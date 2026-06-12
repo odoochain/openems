@@ -4,7 +4,6 @@ import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
@@ -21,12 +20,10 @@ import com.influxdb.query.FluxTable;
 import com.influxdb.query.dsl.Flux;
 import com.influxdb.query.dsl.functions.restriction.Restrictions;
 
-import io.openems.common.OpenemsOEM;
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.exceptions.OpenemsException;
 import io.openems.common.timedata.Resolution;
 import io.openems.common.types.ChannelAddress;
-import io.openems.common.utils.CollectorUtils;
 import io.openems.shared.influxdb.InfluxConnector.InfluxConnection;
 
 /**
@@ -35,6 +32,10 @@ import io.openems.shared.influxdb.InfluxConnector.InfluxConnection;
 public class FluxProxy extends QueryProxy {
 
 	private static final Logger LOG = LoggerFactory.getLogger(FluxProxy.class);
+
+	public FluxProxy(String tag) {
+		super(tag);
+	}
 
 	@Override
 	public SortedMap<ChannelAddress, JsonElement> queryHistoricEnergy(//
@@ -102,19 +103,12 @@ public class FluxProxy extends QueryProxy {
 	}
 
 	@Override
-	public Map<Integer, Map<String, Long>> queryAvailableSince(InfluxConnection influxConnection, String bucket)
-			throws OpenemsNamedException {
-		final var query = this.buildFetchAvailableSinceQuery(bucket);
-		final var queryResult = this.executeQuery(influxConnection, query);
-		return convertAvailableSinceQueryResult(queryResult);
-	}
-
-	@Override
 	public SortedMap<ChannelAddress, JsonElement> queryFirstValueBefore(String bucket,
 			InfluxConnection influxConnection, String measurement, Optional<Integer> influxEdgeId, ZonedDateTime date,
 			Set<ChannelAddress> channels) throws OpenemsNamedException {
-		// TODO Auto-generated method stub
-		return null;
+		final var query = this.buildFetchFirstValueBefore(bucket, measurement, influxEdgeId, date, channels);
+		final var queryResult = this.executeQuery(influxConnection, query);
+		return convertFirstValueBeforeQueryResult(queryResult, channels);
 	}
 
 	@Override
@@ -137,7 +131,7 @@ public class FluxProxy extends QueryProxy {
 				.filter(Restrictions.measurement().equal(measurement));
 
 		if (influxEdgeId.isPresent()) {
-			flux = flux.filter(Restrictions.tag(OpenemsOEM.INFLUXDB_TAG).equal(influxEdgeId.get().toString()));
+			flux = flux.filter(Restrictions.tag(this.tag).equal(influxEdgeId.get().toString()));
 		}
 
 		flux = flux.filter(toChannelAddressFieldList(channels)) //
@@ -163,7 +157,7 @@ public class FluxProxy extends QueryProxy {
 				.append("|> filter(fn: (r) => r._measurement == \"").append(measurement).append("\")");
 
 		if (influxEdgeId.isPresent()) {
-			builder.append("|> filter(fn: (r) => r." + OpenemsOEM.INFLUXDB_TAG + " == \"" + influxEdgeId.get() + "\")");
+			builder.append("|> filter(fn: (r) => r." + this.tag + " == \"" + influxEdgeId.get() + "\")");
 		}
 
 		builder //
@@ -209,7 +203,7 @@ public class FluxProxy extends QueryProxy {
 				.filter(Restrictions.measurement().equal(measurement));
 
 		if (influxEdgeId.isPresent()) {
-			flux = flux.filter(Restrictions.tag(OpenemsOEM.INFLUXDB_TAG).equal(influxEdgeId.get().toString()));
+			flux = flux.filter(Restrictions.tag(this.tag).equal(influxEdgeId.get().toString()));
 		}
 
 		flux = flux.filter(toChannelAddressFieldList(channels)) //
@@ -228,20 +222,26 @@ public class FluxProxy extends QueryProxy {
 	}
 
 	@Override
-	protected String buildFetchAvailableSinceQuery(//
-			String bucket //
-	) {
-		return Flux.from(bucket) //
-				.range(0L, 1L) //
-				.filter(Restrictions.measurement().equal(QueryProxy.AVAILABLE_SINCE_MEASUREMENT)) //
-				.toString();
-	}
-
-	@Override
 	protected String buildFetchFirstValueBefore(String bucket, String measurement, Optional<Integer> influxEdgeId,
 			ZonedDateTime date, Set<ChannelAddress> channels) {
-		// TODO Auto-generated method stub
-		return null;
+		// Calculates actual system date -100 days
+		ZonedDateTime hundredDaysAgo = date.minusDays(100);
+
+		var builder = new StringBuilder() //
+				.append("from(bucket: \"").append(bucket).append("\") ") //
+				.append("|> range(start: ").append(hundredDaysAgo.toInstant()).append(", stop: ")
+				.append(date.toInstant()).append(")") //
+				.append("|> filter(fn: (r) => r._measurement == \"").append(measurement).append("\") ");
+
+		influxEdgeId.ifPresent(id -> builder //
+				.append("|> filter(fn: (r) => r.").append(this.tag).append(" == '").append(id).append("') "));
+
+		builder //
+				.append("|> filter(fn : (r) => ") //
+				.append(toChannelAddressFieldList(channels)) //
+				.append(") ").append("|> last()");
+
+		return builder.toString();
 	}
 
 	/**
@@ -307,14 +307,14 @@ public class FluxProxy extends QueryProxy {
 				timestamp = resolution.revertInfluxDbOffset(timestamp);
 
 				var valueObj = record.getValue();
-				final JsonElement value;
-				if (valueObj == null) {
-					value = JsonNull.INSTANCE;
-				} else if (valueObj instanceof Number) {
-					value = new JsonPrimitive((Number) valueObj);
-				} else {
-					value = new JsonPrimitive(valueObj.toString());
-				}
+				var value = switch (valueObj) {
+				case null //
+					-> JsonNull.INSTANCE;
+				case Number n //
+					-> new JsonPrimitive(n);
+				default //
+					-> new JsonPrimitive(valueObj.toString());
+				};
 
 				var channelAddresss = ChannelAddress.fromString(record.getField());
 
@@ -347,21 +347,21 @@ public class FluxProxy extends QueryProxy {
 			for (FluxRecord record : fluxTable.getRecords()) {
 
 				var valueObj = record.getValue();
-				final JsonElement value;
-				if (valueObj == null) {
-					value = JsonNull.INSTANCE;
-				} else if (valueObj instanceof Number) {
-					var number = (Number) valueObj;
+				var value = switch (valueObj) {
+				case null //
+					-> JsonNull.INSTANCE;
+				case Number number -> {
 					if (number.intValue() < 0) {
 						// do not consider negative values
 						LOG.warn("Got negative Energy value [" + number + "] for query: " + query);
-						value = JsonNull.INSTANCE;
+						yield JsonNull.INSTANCE;
 					} else {
-						value = new JsonPrimitive(number);
+						yield new JsonPrimitive(number);
 					}
-				} else {
-					value = new JsonPrimitive(valueObj.toString());
 				}
+				default //
+					-> new JsonPrimitive(valueObj.toString());
+				};
 
 				var channelAddresss = ChannelAddress.fromString(record.getField());
 
@@ -384,18 +384,39 @@ public class FluxProxy extends QueryProxy {
 		return map;
 	}
 
-	private static Map<Integer, Map<String, Long>> convertAvailableSinceQueryResult(List<FluxTable> queryResult) {
-		if (queryResult == null || queryResult.isEmpty()) {
-			return new TreeMap<>();
+	/**
+	 * Converts the QueryResult of a Last-Data query to a properly typed Table.
+	 *
+	 * @param queryResult the Query-Result
+	 * @param channels    the ChannelAddress
+	 * @return the latest data as Map
+	 * @throws OpenemsNamedException on error
+	 */
+	private static SortedMap<ChannelAddress, JsonElement> convertFirstValueBeforeQueryResult(
+			List<FluxTable> queryResult, Set<ChannelAddress> channels) throws OpenemsNamedException {
+
+		SortedMap<ChannelAddress, JsonElement> latestValues = new TreeMap<>();
+
+		for (FluxTable fluxTable : queryResult) {
+			for (FluxRecord record : fluxTable.getRecords()) {
+
+				var valueObj = record.getValue();
+				var value = switch (valueObj) {
+				case null //
+					-> JsonNull.INSTANCE;
+				case Number number //
+					-> new JsonPrimitive(number);
+				default //
+					-> new JsonPrimitive(valueObj.toString());
+				};
+
+				var channelAddresss = ChannelAddress.fromString(record.getField());
+				latestValues.put(channelAddresss, value);
+
+			}
 		}
-		return queryResult.stream() //
-				.flatMap(t -> t.getRecords().stream()) //
-				.collect(CollectorUtils.toDoubleMap(//
-						record -> Integer.parseInt(//
-								(String) record.getValueByKey(OpenemsOEM.INFLUXDB_TAG) //
-						), //
-						record -> (String) record.getValueByKey(QueryProxy.CHANNEL_TAG), //
-						record -> (Long) record.getValue()) //
-				);
+
+		return latestValues;
 	}
+
 }

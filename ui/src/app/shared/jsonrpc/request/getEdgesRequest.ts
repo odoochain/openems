@@ -2,10 +2,10 @@ import { JsonrpcRequest } from "../base";
 
 /**
  * Represents a JSON-RPC Request to get Edges.
- * 
+ *
  * <p>
  * This is used by UI to get Edges for the overview.
- * 
+ *
  * <pre>
  * {
  *   "jsonrpc": "2.0",
@@ -14,12 +14,14 @@ import { JsonrpcRequest } from "../base";
  *   "params": {
  *      "page": number,
  *      "query?": string,
- *      "limit?": number
+ *      "limit?": number,
+ *      "searchParams?": {}
  *   }
  * }
  * </pre>
  */
 export class GetEdgesRequest extends JsonrpcRequest {
+
 
     private static METHOD: string = "getEdges";
 
@@ -27,10 +29,10 @@ export class GetEdgesRequest extends JsonrpcRequest {
         public override readonly params: {
             page: number,
             query?: string,
-            limit?: number
-        }
+            limit?: number,
+            searchParams?: {}
+        },
     ) {
         super(GetEdgesRequest.METHOD, params);
     }
-
 }

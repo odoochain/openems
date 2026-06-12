@@ -1,6 +1,7 @@
 package io.openems.common.utils;
 
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -55,14 +56,19 @@ public class ThreadPoolUtils {
 	 * @param executor the executor
 	 * @return a String
 	 */
-	public static String debugLog(ThreadPoolExecutor executor) {
-		var activeCount = executor.getActiveCount();
+	public static String debugLog(Executor executor) {
+		if (!(executor instanceof ThreadPoolExecutor threadPoolExecutor)) {
+			return "UNDEFINED";
+		}
+
+		var activeCount = threadPoolExecutor.getActiveCount();
 		var b = new StringBuilder() //
-				.append("Pool: ").append(executor.getPoolSize()).append("/").append(executor.getMaximumPoolSize()) //
-				.append(", Pending: ").append(executor.getQueue().size()) //
-				.append(", Completed: ").append(executor.getCompletedTaskCount()) //
+				.append("Pool: ").append(threadPoolExecutor.getPoolSize()) //
+				.append("/").append(threadPoolExecutor.getMaximumPoolSize()) //
+				.append(", Pending: ").append(threadPoolExecutor.getQueue().size()) //
+				.append(", Completed: ").append(threadPoolExecutor.getCompletedTaskCount()) //
 				.append(", Active: ").append(activeCount); //
-		if (executor.getMaximumPoolSize() == activeCount) {
+		if (threadPoolExecutor.getMaximumPoolSize() == activeCount) {
 			b.append(" !!!BACKPRESSURE!!!");
 		}
 		return b.toString();
@@ -74,13 +80,17 @@ public class ThreadPoolUtils {
 	 * @param executor the executor
 	 * @return a Map of key to value
 	 */
-	public static Map<String, Number> debugMetrics(ThreadPoolExecutor executor) {
-		return Map.<String, Number>of(//
-				"PoolSize", executor.getPoolSize(), //
-				"MaxPoolSize", executor.getMaximumPoolSize(), //
-				"Active", executor.getActiveCount(), //
-				"Pending", executor.getQueue().size(), //
-				"Completed", executor.getCompletedTaskCount() //
+	public static Map<String, Long> debugMetrics(Executor executor) {
+		if (!(executor instanceof ThreadPoolExecutor threadPoolExecutor)) {
+			return Map.of();
+		}
+
+		return Map.of(//
+				"PoolSize", Long.valueOf(threadPoolExecutor.getPoolSize()), //
+				"MaxPoolSize", Long.valueOf(threadPoolExecutor.getMaximumPoolSize()), //
+				"Active", Long.valueOf(threadPoolExecutor.getActiveCount()), //
+				"Pending", Long.valueOf(threadPoolExecutor.getQueue().size()), //
+				"Completed", threadPoolExecutor.getCompletedTaskCount() //
 		);
 	}
 

@@ -11,19 +11,9 @@ function isTestUser(user: User): boolean {
     });
 }
 
-export function canSeeAppCenter(edge: Edge): boolean {
-    return edge.roleIsAtLeast(Role.ADMIN)
-        && edge.isVersionAtLeast('2022.1.0')
-        || edge.roleIsAtLeast(Role.OWNER)
-        && edge.isVersionAtLeast('2023.3.6');
-}
-
 export function canEnterKey(edge: Edge, user: User): boolean {
     if (isTestUser(user)) {
         return true;
-    }
-    if (edge.roleIsAtLeast(Role.ADMIN)) {
-        return false;
     }
     if (edge.roleIsAtLeast(Role.OWNER)) {
         return true;
@@ -39,5 +29,15 @@ export function hasPredefinedKey(edge: Edge, user: User): boolean {
 }
 
 export function hasKeyModel(edge: Edge): boolean {
-    return edge.isVersionAtLeast('2023.1.2');
+    return edge.isVersionAtLeast("2023.1.2");
+}
+
+/**
+ * Checks if the edge has a version that has the UpdateAppConfig jsonrpc request.
+ *
+ * @param edge the edge to be checked.
+ * @returns true if the version is atleast '2025.1.2', false otherwise
+ */
+export function hasUpdateAppVersion(edge: Edge): boolean {
+    return edge.isVersionAtLeast("2025.1.2");
 }

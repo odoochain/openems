@@ -13,6 +13,7 @@ import com.google.gson.JsonElement;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.function.ThrowingTriFunction;
+import io.openems.common.oem.OpenemsEdgeOem;
 import io.openems.common.session.Language;
 import io.openems.common.utils.EnumUtils;
 import io.openems.common.utils.JsonUtils;
@@ -30,6 +31,7 @@ import io.openems.edge.core.appmanager.OpenemsAppCardinality;
 import io.openems.edge.core.appmanager.OpenemsAppCategory;
 import io.openems.edge.core.appmanager.dependency.DependencyDeclaration;
 import io.openems.edge.core.appmanager.dependency.DependencyDeclaration.AppDependencyConfig;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.DependencyProperties;
 
 /**
  * Test app for testing dependencies.
@@ -59,7 +61,7 @@ public class TestADependencyToC extends AbstractEnumOpenemsApp<Property> impleme
 	}
 
 	@Override
-	public AppDescriptor getAppDescriptor() {
+	public AppDescriptor getAppDescriptor(OpenemsEdgeOem oem, Language language) {
 		return AppDescriptor.create() //
 				.build();
 	}
@@ -105,13 +107,15 @@ public class TestADependencyToC extends AbstractEnumOpenemsApp<Property> impleme
 					dependencyUpdatePolicy, dependencyDeletePolicy, //
 					AppDependencyConfig.create() //
 							.setAppId("App.Test.TestC") //
-							.setProperties(JsonUtils.buildJsonObject() //
+							.setProperties(DependencyProperties.fromJson(JsonUtils.buildJsonObject() //
 									.addProperty(TestC.Property.NUMBER.name(), number) //
-									.build())
+									.build()))
 							.build()) //
 			);
 
-			return new AppConfiguration(null, null, null, dependencies);
+			return AppConfiguration.create() //
+					.addDependencies(dependencies) //
+					.build();
 		};
 	}
 

@@ -39,6 +39,48 @@ public enum Unit {
 	THOUSANDTH("‰"),
 
 	/**
+	 * Ten Thousandth [‰], 0-10000.
+	 */
+	TENTHOUSANDTH("0.1‰"),
+
+	// ##########
+	// Rate of change per time
+	// ##########
+	// Represents how many percent/permille of the nominal X changes per time.
+
+	/**
+	 * Unit of the rate of change per second of the nominal power [%Pn/s].
+	 */
+	PERCENT_PN_PER_SECOND("%Pn/s"),
+
+	/**
+	 * Unit of the rate of change per second of the nominal power [‰Pn/s].
+	 */
+	PROMILLE_PN_PER_SECOND("‰Pn/s", PERCENT_PN_PER_SECOND, -1),
+
+	/**
+	 * Unit of percentage of power relative to nominal power per minute [%Pn/min].
+	 */
+	PERCENT_PN_PER_MINUTE("%Pn/min"),
+
+	/**
+	 * Unit of per mille of power relative to nominal power per minute [‰Pn/min].
+	 */
+	PROMILLE_PN_PER_MINUTE("‰Pn/min", PERCENT_PN_PER_MINUTE, -1),
+
+	/**
+	 * Unit of the power change per second in percent as a fraction of nominal power
+	 * [%ln/s].
+	 */
+	PERCENT_LN_PER_SECOND("%ln/s"),
+
+	/**
+	 * Unit of the power change per second in permille as a fraction of nominal
+	 * power [‰ln/s].
+	 */
+	PROMILLE_LN_PER_SECOND("‰ln/s", PERCENT_LN_PER_SECOND, -1),
+
+	/**
 	 * On or Off.
 	 */
 	ON_OFF("On/Off"), // Symbol is ignored in #format()
@@ -82,6 +124,26 @@ public enum Unit {
 	 */
 	KILOVOLT_AMPERE("kVA", VOLT_AMPERE, 3),
 
+	/**
+	 * Percentage of nominal power [%Pn].
+	 */
+	PERCENT_PN("%Pn"),
+
+	/**
+	 * Per mille of nominal power [‰Pn].
+	 */
+	PROMILLE_PN("‰Pn", PERCENT_PN, -1),
+
+	/**
+	 * Reactive power per percentage of nominal power [Qmax/1%Pn].
+	 */
+	QMAX_PER_PERCENT_PN("Qmax/1%Pn"),
+
+	/**
+	 * Reactive power per decipercent of nominal power [Qmax/10%Pn].
+	 */
+	QMAX_PER_DECIPERCENT_PN("Qmax/10%Pn"),
+
 	// ##########
 	// Voltage
 	// ##########
@@ -90,6 +152,11 @@ public enum Unit {
 	 * Unit of Voltage [V].
 	 */
 	VOLT("V"),
+
+	/**
+	 * Unit of Voltage [dV].
+	 */
+	DEZIVOLT("dV", VOLT, -1),
 
 	/**
 	 * Unit of Voltage [mV].
@@ -101,6 +168,26 @@ public enum Unit {
 	 */
 	MICROVOLT("uV", VOLT, -6),
 
+	/**
+	 * Unit of Voltage relative to nominal voltage [%Vn].
+	 */
+	PERCENT_VN("%Vn"),
+
+	/**
+	 * Unit of Voltage relative to nominal voltage [‰Vn].
+	 */
+	PROMILLE_VN("‰Vn", PERCENT_VN, -1),
+
+	/**
+	 * Unit of reactive-power change percent voltage change [Qmax/1%Vn].
+	 */
+	QMAX_PER_PERCENT_VN("Qmax/1%Vn"),
+
+	/**
+	 * Unit of reactive-power change 0.1 percent voltage change [Qmax/10%Vn].
+	 */
+	QMAX_PER_DECIPERCENT_VN("Qmax/10%Vn", QMAX_PER_PERCENT_VN, -1),
+
 	// ##########
 	// Current
 	// ##########
@@ -109,6 +196,11 @@ public enum Unit {
 	 * Unit of Current [A].
 	 */
 	AMPERE("A"),
+
+	/**
+	 * Unit of Current [dA].
+	 */
+	DEZIAMPERE("dA", AMPERE, -1),
 
 	/**
 	 * Unit of Current [mA].
@@ -187,9 +279,10 @@ public enum Unit {
 	// ##########
 
 	/**
-	 * Unit of Energy Price [€/MWh].
+	 * Unit of Energy Price, e.g. [€/MWh]. (see Meta.ChannelId#CURRENCY).
 	 */
-	EUROS_PER_MEGAWATT_HOUR("€/MWh"),
+	// TODO symbol should incorporate actual Currency
+	MONEY_PER_MEGAWATT_HOUR("€/MWh"),
 
 	// ##########
 	// Frequency
@@ -205,6 +298,16 @@ public enum Unit {
 	 */
 	MILLIHERTZ("mHz", HERTZ, -3),
 
+	/**
+	 * Unit of difference of the Frequency [Hz].
+	 */
+	PERCENT_PER_HERTZ("%/Hz"),
+
+	/**
+	 * Unit of difference of the Frequency [Hz] in Thousandth.
+	 */
+	PROMILLE_PER_HERTZ("‰/Hz", PERCENT_PER_HERTZ, -1),
+
 	// ##########
 	// Temperature
 	// ##########
@@ -212,12 +315,12 @@ public enum Unit {
 	/**
 	 * Unit of Temperature [C].
 	 */
-	DEGREE_CELSIUS("C"),
+	DEGREE_CELSIUS("°C"),
 
 	/**
 	 * Unit of Temperature [dC].
 	 */
-	DEZIDEGREE_CELSIUS("dC", DEGREE_CELSIUS, -1),
+	DEZIDEGREE_CELSIUS("°dC", DEGREE_CELSIUS, -1),
 
 	// ##########
 	// Time
@@ -274,7 +377,58 @@ public enum Unit {
 	/**
 	 * Unit of Resistance [uOhm].
 	 */
-	MICROOHM("uOhm", OHM, -6);
+	MICROOHM("uOhm", OHM, -6),
+
+	// ##########
+	// Pressure
+	// ##########
+
+	/**
+	 * Unit of Pressure [bar].
+	 */
+	BAR("bar"),
+
+	/**
+	 * Unit of Pressure [mbar].
+	 */
+	MILLIBAR("mbar", BAR, -3),
+
+	/**
+	 * Unit of Absolute Humidity [g/m³].
+	 */
+	GRAMS_PER_CUBIC_METER("g/m³"),
+
+	/*
+	 * Unit of CO2 Parts Per Million [ppm].
+	 */
+	PARTS_PER_MILLION("ppm"),
+
+	/**
+	 * Unit of energy [kJ].
+	 */
+	KILOJOULE("kJ"),
+
+	/**
+	 * Unit of Enthalpy [kJ/kg].
+	 */
+	KILOJOULES_PER_KILOGRAM("kJ/kg"),
+
+	/**
+	 * Unit of angular measurement in decimal degrees [°].
+	 */
+	DECIMAL_DEGREE("°"),
+
+	/**
+	 * Unit of Flow Rate [ml/min].
+	 */
+	MILLILITER_PER_MINUTE("ml/min"),
+
+	/**
+	 * Unit of Electrical Conductivity [µS/cm].
+	 */
+	MIKROSIEMENS_PER_CENTIMETRE("µS/cm"),
+
+	;
 
 	public final String symbol;
 	public final Unit baseUnit;
@@ -348,12 +502,18 @@ public enum Unit {
 		case NONE -> //
 			value.toString();
 
-		case AMPERE, DEGREE_CELSIUS, DEZIDEGREE_CELSIUS, EUROS_PER_MEGAWATT_HOUR, HERTZ, MILLIAMPERE, MICROAMPERE,
-				MILLIHERTZ, MILLIVOLT, MICROVOLT, PERCENT, VOLT, VOLT_AMPERE, VOLT_AMPERE_REACTIVE, WATT, KILOWATT,
-				MILLIWATT, WATT_HOURS, OHM, KILOOHM, SECONDS, AMPERE_HOURS, HOUR, CUMULATED_SECONDS, KILOAMPERE_HOURS,
-				KILOVOLT_AMPERE, KILOVOLT_AMPERE_REACTIVE, KILOVOLT_AMPERE_REACTIVE_HOURS, KILOWATT_HOURS, MICROOHM,
-				MILLIAMPERE_HOURS, MILLIOHM, MILLISECONDS, MINUTE, THOUSANDTH, VOLT_AMPERE_HOURS,
-				VOLT_AMPERE_REACTIVE_HOURS, WATT_HOURS_BY_WATT_PEAK, CUMULATED_WATT_HOURS -> //
+		case AMPERE, DECIMAL_DEGREE, DEGREE_CELSIUS, DEZIDEGREE_CELSIUS, MONEY_PER_MEGAWATT_HOUR, HERTZ, MILLIAMPERE,
+				MICROAMPERE, MILLIHERTZ, MILLIVOLT, MICROVOLT, PERCENT, VOLT, VOLT_AMPERE, VOLT_AMPERE_REACTIVE, WATT,
+				KILOWATT, MILLIWATT, WATT_HOURS, OHM, KILOOHM, SECONDS, AMPERE_HOURS, HOUR, CUMULATED_SECONDS,
+				KILOAMPERE_HOURS, KILOVOLT_AMPERE, KILOVOLT_AMPERE_REACTIVE, KILOVOLT_AMPERE_REACTIVE_HOURS,
+				KILOWATT_HOURS, MICROOHM, MILLIAMPERE_HOURS, MILLIOHM, MILLISECONDS, MINUTE, THOUSANDTH,
+				VOLT_AMPERE_HOURS, VOLT_AMPERE_REACTIVE_HOURS, WATT_HOURS_BY_WATT_PEAK, CUMULATED_WATT_HOURS, BAR,
+				MILLIBAR, TENTHOUSANDTH, DEZIAMPERE, DEZIVOLT, GRAMS_PER_CUBIC_METER, PARTS_PER_MILLION, KILOJOULE,
+				KILOJOULES_PER_KILOGRAM, MILLILITER_PER_MINUTE, MIKROSIEMENS_PER_CENTIMETRE, PERCENT_VN, PROMILLE_VN,
+				PERCENT_PN, PROMILLE_PN, PERCENT_PN_PER_SECOND, PROMILLE_PN_PER_SECOND, PERCENT_PER_HERTZ,
+				PROMILLE_PER_HERTZ, PERCENT_LN_PER_SECOND, PROMILLE_LN_PER_SECOND, QMAX_PER_PERCENT_VN,
+				QMAX_PER_DECIPERCENT_VN, QMAX_PER_PERCENT_PN, QMAX_PER_DECIPERCENT_PN, PERCENT_PN_PER_MINUTE,
+				PROMILLE_PN_PER_MINUTE -> //
 			value + " " + this.symbol;
 
 		case ON_OFF -> //
@@ -376,7 +536,7 @@ public enum Unit {
 	 */
 	public static Unit fromSymbolOrElse(String symbol, Unit defaultUnit) {
 		return Stream.of(Unit.values()) //
-				.filter(u -> u.symbol == symbol) //
+				.filter(u -> u.symbol.equals(symbol)) //
 				.findFirst() //
 				.orElse(defaultUnit);
 	}

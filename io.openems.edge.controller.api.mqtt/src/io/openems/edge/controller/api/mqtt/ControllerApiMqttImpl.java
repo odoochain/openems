@@ -1,6 +1,15 @@
 package io.openems.edge.controller.api.mqtt;
 
+import static io.openems.common.utils.ThreadPoolUtils.shutdownAndAwaitTermination;
+
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.paho.mqttv5.client.IMqttClient;
 import org.eclipse.paho.mqttv5.common.MqttException;
@@ -23,6 +32,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
+import io.openems.common.exceptions.OpenemsException;
 import io.openems.common.types.EdgeConfig;
 import io.openems.edge.common.component.AbstractOpenemsComponent;
 import io.openems.edge.common.component.ComponentManager;
@@ -46,9 +56,22 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 
 	protected static final String COMPONENT_NAME = "Controller.Api.MQTT";
 
+	private static final long INITIAL_RECONNECT_DELAY_SECONDS = 5;
+	private static final long MAX_RECONNECT_DELAY_SECONDS = 300; // 5 minutes maximum delay.
+	private static final double RECONNECT_DELAY_MULTIPLIER = 1.5;
+
 	private final Logger log = LoggerFactory.getLogger(ControllerApiMqttImpl.class);
+	private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
+	private final AtomicInteger reconnectionAttempt = new AtomicInteger(0);
 	private final SendChannelValuesWorker sendChannelValuesWorker = new SendChannelValuesWorker(this);
 	private final MqttConnector mqttConnector = new MqttConnector();
+
+	protected Config config;
+
+	private volatile ScheduledFuture<?> reconnectFuture = null;
+	private String topicPrefix;
+	private IMqttClient mqttClient = null;
+	private List<MqttTopicFilter> topicFilters;
 
 	@Reference(policy = ReferencePolicy.DYNAMIC, policyOption = ReferencePolicyOption.GREEDY, cardinality = ReferenceCardinality.OPTIONAL)
 	private volatile Timedata timedata = null;
@@ -56,10 +79,26 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 	@Reference
 	protected ComponentManager componentManager;
 
-	protected Config config;
+	private static List<MqttTopicFilter> getFilter(Config config) throws OpenemsException {
+		// Expand the filterSpec to the filterList
+		if (config == null || config.topicFilters().length == 0) {
+			return List.of();
+		}
+		if (config.topicFilters().length == 1
+				&& (config.topicFilters()[0] == null || config.topicFilters()[0].isBlank())) {
+			return List.of();
+		}
 
-	private String topicPrefix;
-	private IMqttClient mqttClient = null;
+		final var newFilter = new ArrayList<MqttTopicFilter>(config.topicFilters().length);
+		for (int i = 0; i < config.topicFilters().length; i++) {
+			try {
+				newFilter.add(MqttTopicFilter.of(config.topicFilters()[i]));
+			} catch (IllegalArgumentException e) {
+				throw new OpenemsException("Unable to parse filter pattern: '" + config.topicFilters()[i] + "'");
+			}
+		}
+		return newFilter;
+	}
 
 	public ControllerApiMqttImpl() {
 		super(//
@@ -73,29 +112,65 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 	private void activate(ComponentContext context, Config config) throws Exception {
 		this.config = config;
 
+		try {
+			this.topicFilters = ControllerApiMqttImpl.getFilter(config);
+		} catch (OpenemsException e) {
+			this.log.warn("Error parsing filter. Filter disabled!: {}", e.getMessage(), e);
+			this.topicFilters = List.of();
+		}
+		if (!this.topicFilters.isEmpty()) {
+			this.log.info("Enabled filters: {}", String.join(", ", config.topicFilters()));
+		}
+
 		// Publish MQTT messages under the topic "edge/edge0/..."
-		this.topicPrefix = String.format(ControllerApiMqtt.TOPIC_PREFIX, config.clientId());
+		this.topicPrefix = createTopicPrefix(config);
 
 		super.activate(context, config.id(), config.alias(), config.enabled());
-		this.mqttConnector.connect(config.uri(), config.clientId(), config.username(), config.password())
-				.thenAccept(client -> {
-					this.mqttClient = client;
-					this.logInfo(this.log, "Connected to MQTT Broker [" + config.uri() + "]");
-				});
+
+		if (this.isEnabled()) {
+			this.scheduleReconnect();
+		}
+	}
+
+	/**
+	 * Creates the topic prefix in either format.
+	 * 
+	 * <ul>
+	 * <li>topic_prefix/edge/edge_id/
+	 * <li>edge/edge_id/
+	 * </ul>
+	 * 
+	 * @param config the {@link Config}
+	 * @return the prefix
+	 */
+	protected static String createTopicPrefix(Config config) {
+		final var b = new StringBuilder();
+		if (config.topicPrefix() != null && !config.topicPrefix().isBlank()) {
+			b //
+					.append(config.topicPrefix()) //
+					.append("/");
+		}
+		b //
+				.append("edge/") //
+				.append(config.clientId()) //
+				.append("/");
+		return b.toString();
 	}
 
 	@Override
 	@Deactivate
 	protected void deactivate() {
 		super.deactivate();
-		this.mqttConnector.deactivate();
-		this.sendChannelValuesWorker.deactivate();
+		shutdownAndAwaitTermination(this.scheduledExecutorService, 0);
+
 		if (this.mqttClient != null) {
 			try {
+				this.mqttClient.disconnect();
 				this.mqttClient.close();
+				this.mqttClient = null;
 			} catch (MqttException e) {
-				this.logWarn(this.log, "Unable to close connection to MQTT brokwer: " + e.getMessage());
-				e.printStackTrace();
+				this.logWarn(this.log, "Unable to close connection to MQTT broker: " + e.getMessage());
+				this.log.warn(e.getMessage(), e);
 			}
 		}
 	}
@@ -112,7 +187,7 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 
 	@Override
 	protected void logWarn(Logger log, String message) {
-		super.logInfo(log, message);
+		super.logWarn(log, message);
 	}
 
 	@Override
@@ -128,12 +203,13 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 		case EdgeEventConstants.TOPIC_CONFIG_UPDATE:
 			// Send new EdgeConfig
 			var config = (EdgeConfig) event.getProperty(EdgeEventConstants.TOPIC_CONFIG_UPDATE_KEY);
-			this.publish(ControllerApiMqtt.TOPIC_EDGE_CONFIG, config.toJson().toString(), //
+			this.publish(ControllerApiMqtt.TOPIC_EDGE_CONFIG + "/", config.toJson().toString(), //
 					1 /* QOS */, true /* retain */, new MqttProperties() /* no specific properties */);
 
 			// Trigger sending of all channel values, because a Component might have
 			// disappeared
 			this.sendChannelValuesWorker.sendValuesOfAllChannelsOnce();
+			break;
 		}
 	}
 
@@ -143,19 +219,28 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 	 * @param subTopic the MQTT topic. The global MQTT Topic prefix is added in
 	 *                 front of this string
 	 * @param message  the message
-	 * @return true if message was successfully published; false otherwise
+	 * @return MqttPublishStatus enum value: OK if the message was successfully
+	 *         published, ERROR if publishing failed, FILTERED if the topic was
+	 *         filtered.
 	 */
-	protected boolean publish(String subTopic, MqttMessage message) {
+	protected MqttPublishStatus publish(String subTopic, MqttMessage message) {
+		if (!this.isEnabled()) {
+			return MqttPublishStatus.ERROR;
+		}
+
 		var mqttClient = this.mqttClient;
 		if (mqttClient == null) {
-			return false;
+			return MqttPublishStatus.ERROR;
 		}
 		try {
+			if (!this.filterTopic(subTopic)) {
+				return MqttPublishStatus.FILTERED;
+			}
 			mqttClient.publish(this.topicPrefix + subTopic, message);
-			return true;
+			return MqttPublishStatus.OK;
 		} catch (MqttException e) {
 			this.logWarn(this.log, e.getMessage());
-			return false;
+			return MqttPublishStatus.ERROR;
 		}
 	}
 
@@ -168,10 +253,75 @@ public class ControllerApiMqttImpl extends AbstractOpenemsComponent
 	 * @param qos        the MQTT QOS
 	 * @param retained   the MQTT retained parameter
 	 * @param properties the {@link MqttProperties}
-	 * @return true if message was successfully published; false otherwise
+	 * @return MqttPublishStatus enum value: OK if the message was successfully
+	 *         published, ERROR if publishing failed, FILTERED if the topic was
+	 *         filtered.
 	 */
-	protected boolean publish(String subTopic, String message, int qos, boolean retained, MqttProperties properties) {
+	protected MqttPublishStatus publish(String subTopic, String message, int qos, boolean retained,
+			MqttProperties properties) {
 		var msg = new MqttMessage(message.getBytes(StandardCharsets.UTF_8), qos, retained, properties);
 		return this.publish(subTopic, msg);
 	}
+
+	protected boolean filterTopic(String topic) {
+		if (this.topicFilters.isEmpty()) {
+			return true;
+		}
+		for (final var filter : this.topicFilters) {
+			if (filter.matches(topic)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private synchronized void scheduleReconnect() {
+		if (this.reconnectFuture != null && !this.reconnectFuture.isDone()) {
+			this.reconnectFuture.cancel(false);
+		}
+
+		this.attemptConnect();
+	}
+
+	private void attemptConnect() {
+		if (this.mqttClient != null && this.mqttClient.isConnected()) {
+			return; // Already connected
+		}
+		try {
+			this.mqttConnector
+					.connect(this.config.uri(), this.config.clientId(), this.config.username(), this.config.password(),
+							this.config.certPem(), this.config.privateKeyPem(), this.config.trustStorePem())
+					.thenAccept(client -> {
+						this.mqttClient = client;
+						this.logInfo(this.log, "Connected to MQTT Broker [" + this.config.uri()
+								+ "]! Publish to topics '" + this.topicPrefix + "#'");
+						this.reconnectionAttempt.set(0); // Reset on successful connection.
+					}) //
+					.exceptionally(ex -> {
+						this.log.error("Failed to connect to MQTT broker: " + ex.getMessage(), ex);
+						this.scheduleNextAttempt(); // Schedule the next attempt with an increased delay.
+						return null;
+					});
+		} catch (Exception e) {
+			this.log.error("Error attempting to connect to MQTT broker", e);
+			this.scheduleNextAttempt(); // Schedule the next attempt with an increased delay.
+		}
+	}
+
+	private void scheduleNextAttempt() {
+		long delay = this.calculateNextDelay();
+		// Ensure the executor service is not shut down
+		if (!this.scheduledExecutorService.isShutdown()) {
+			this.reconnectFuture = this.scheduledExecutorService.schedule(this::attemptConnect, delay,
+					TimeUnit.SECONDS);
+		}
+	}
+
+	private long calculateNextDelay() {
+		long delay = (long) (INITIAL_RECONNECT_DELAY_SECONDS
+				* Math.pow(RECONNECT_DELAY_MULTIPLIER, this.reconnectionAttempt.getAndIncrement()));
+		delay = Math.min(delay, MAX_RECONNECT_DELAY_SECONDS); // Ensure delay does not exceed maximum
+		return delay;
+	}
+
 }

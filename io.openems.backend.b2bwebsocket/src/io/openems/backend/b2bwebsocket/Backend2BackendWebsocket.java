@@ -1,5 +1,8 @@
 package io.openems.backend.b2bwebsocket;
 
+import static java.util.stream.Collectors.toUnmodifiableMap;
+
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -17,14 +20,17 @@ import org.osgi.service.metatype.annotations.Designate;
 import org.slf4j.Logger;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonPrimitive;
 
+import io.openems.backend.authentication.api.AuthUserPasswordAuthenticationService;
 import io.openems.backend.common.component.AbstractOpenemsBackendComponent;
-import io.openems.backend.common.edgewebsocket.EdgeWebsocket;
+import io.openems.backend.common.debugcycle.DebugLoggable;
+import io.openems.backend.common.edge.EdgeManager;
 import io.openems.backend.common.jsonrpc.JsonRpcRequestHandler;
 import io.openems.backend.common.metadata.Metadata;
 import io.openems.backend.common.timedata.TimedataManager;
 import io.openems.common.utils.ThreadPoolUtils;
-import io.openems.common.websocket.AbstractWebsocketServer.DebugMode;
 
 @Designate(ocd = Config.class, factory = true)
 @Component(//
@@ -35,7 +41,9 @@ import io.openems.common.websocket.AbstractWebsocketServer.DebugMode;
 @EventTopics({ //
 		Metadata.Events.AFTER_IS_INITIALIZED //
 })
-public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent implements EventHandler {
+public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent implements EventHandler, DebugLoggable {
+
+	private static final String COMPONENT_ID = "b2bwebsocket0";
 
 	public static final int DEFAULT_PORT = 8076;
 
@@ -49,10 +57,13 @@ public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent im
 	protected volatile Metadata metadata;
 
 	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	protected volatile AuthUserPasswordAuthenticationService userAuthService;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
 	protected volatile TimedataManager timedataManager;
 
 	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
-	protected volatile EdgeWebsocket edgeWebsocket;
+	protected volatile EdgeManager edgeManager;
 
 	private WebsocketServer server = null;
 	private Config config;
@@ -64,6 +75,10 @@ public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent im
 	@Activate
 	private void activate(Config config) {
 		this.config = config;
+
+		if (this.metadata.isInitialized()) {
+			this.startServer();
+		}
 	}
 
 	@Deactivate
@@ -74,14 +89,12 @@ public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent im
 
 	/**
 	 * Create and start new server.
-	 *
-	 * @param port      the port
-	 * @param poolSize  number of threads dedicated to handle the tasks
-	 * @param debugMode activate a regular debug log about the state of the tasks
 	 */
-	private synchronized void startServer(int port, int poolSize, DebugMode debugMode) {
-		this.server = new WebsocketServer(this, this.getName(), port, poolSize, debugMode);
-		this.server.start();
+	private synchronized void startServer() {
+		if (this.server == null) {
+			this.server = new WebsocketServer(this, this.getName(), this.config.port(), this.config.poolSize());
+			this.server.start();
+		}
 	}
 
 	/**
@@ -112,8 +125,35 @@ public class Backend2BackendWebsocket extends AbstractOpenemsBackendComponent im
 	public void handleEvent(Event event) {
 		switch (event.getTopic()) {
 		case Metadata.Events.AFTER_IS_INITIALIZED:
-			this.startServer(this.config.port(), this.config.poolSize(), this.config.debugMode());
+			this.startServer();
 			break;
 		}
 	}
+
+	public String getId() {
+		return COMPONENT_ID;
+	}
+
+	@Override
+	public String debugLog() {
+		return new StringBuilder() //
+				.append("[").append(this.getName()).append("] ") //
+				.append(this.server != null //
+						? this.server.debugLog() //
+						: "NOT STARTED") //
+				.toString();
+	}
+
+	@Override
+	public Map<String, JsonElement> debugMetrics() {
+		if (this.server == null) {
+			return null;
+		}
+
+		return this.server.debugMetrics().entrySet().stream() //
+				.collect(toUnmodifiableMap(//
+						e -> this.getId() + "/" + e.getKey(), //
+						e -> new JsonPrimitive(e.getValue())));
+	}
+
 }

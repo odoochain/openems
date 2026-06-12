@@ -1,11 +1,12 @@
+import { States } from "src/app/shared/ngrx-store/states";
 import { JsonrpcRequest, JsonrpcResponseSuccess } from "../../../../shared/jsonrpc/base";
 
 /**
  * Represents a JSON-RPC Request for 'getAppInstances'.
- * 
+ *
  * <p>
  * Request:
- * 
+ *
  * <pre>
  * {
  *   "jsonrpc": "2.0",
@@ -16,10 +17,10 @@ import { JsonrpcRequest, JsonrpcResponseSuccess } from "../../../../shared/jsonr
  *   }
  * }
  * </pre>
- * 
+ *
  * <p>
  * Response:
- * 
+ *
  * <pre>
  * {
  *   "jsonrpc": "2.0",
@@ -37,10 +38,12 @@ export namespace GetAppInstances {
 
     export class Request extends JsonrpcRequest {
 
+        protected override requiredState: States = States.EDGE_SELECTED;
+
         public constructor(
             public override readonly params: {
                 appId: string
-            }
+            },
         ) {
             super(METHOD, params);
         }
@@ -52,7 +55,7 @@ export namespace GetAppInstances {
             public override readonly id: string,
             public override readonly result: {
                 instances: AppInstance[]
-            }
+            },
         ) {
             super(id, result);
         }
@@ -62,7 +65,7 @@ export namespace GetAppInstances {
         appId: string,
         alias: string,
         instanceId: string,
-        properties: {},
+        properties: Record<string, unknown>,
         dependencies: Dependency[]
     }
 

@@ -1,6 +1,7 @@
 [![Build Status](https://github.com/OpenEMS/openems/actions/workflows/build.yml/badge.svg)](https://github.com/OpenEMS/openems/actions/workflows/build.yml)
 [![Gitpod live-demo](https://img.shields.io/badge/Gitpod-live--demo-blue?logo=gitpod)](https://gitpod.io/#https://github.com/OpenEMS/openems/tree/main)
 [![Cite via Zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.4440884.svg)](https://doi.org/10.5281/zenodo.4440883)
+[![codecov](https://codecov.io/gh/openems/openems/graph/badge.svg?token=xliIughqt1)](https://codecov.io/gh/openems/openems)
 
 <h1 align="center">
   <img src="./doc/modules/ROOT/assets/images/OpenEMS-Logo.png" alt="the Feneco - OpenEMS Logo" width="200"></a>
@@ -13,11 +14,11 @@ If you plan to use OpenEMS for your own projects, please consider joining the [O
 
 ### OpenEMS in »Local Energy Management«
 
-![alt text](./doc/modules/ROOT/assets/images/local-energy-management.png "Local Energy Management")
+![Local Energy Management](./doc/modules/ROOT/assets/images/local-energy-management.png "Local Energy Management")
 
 ### OpenEMS in »Areal Energy Management«
 
-![alt text](./doc/modules/ROOT/assets/images/areal-energy-management.png "Areal Energy Management")
+![Areal Energy Management](./doc/modules/ROOT/assets/images/areal-energy-management.png "Areal Energy Management")
 
 ## OpenEMS IoT stack
 
@@ -38,19 +39,20 @@ The OpenEMS software architecture was designed to leverage some features that ar
 
 ## OpenEMS UI Screenshots
 
-![alt text](./doc/modules/ROOT/assets/images/ui-live.png "OpenEMS UI Live View")
-![alt text](./doc/modules/ROOT/assets/images/ui-history.png "OpenEMS UI History View")
+![OpenEMS UI Live View](./doc/modules/ROOT/assets/images/ui-live.png "OpenEMS UI Live View")
+![OpenEMS UI History View](./doc/modules/ROOT/assets/images/ui-history.png "OpenEMS UI History View")
 
 ## System architecture
 
 OpenEMS is generally used in combination with external hardware and software components
 (the exception is a simulated development environment - see [Getting Started](https://openems.github.io/openems.io/openems/latest/gettingstarted.html)). As a brief overview, this is how OpenEMS is used in production setups:
-![alt text](./doc/modules/ROOT/assets/images/system-architecture.png "OpenEMS System Architecture")
+![OpenEMS System Architecture](./doc/modules/ROOT/assets/images/system-architecture.png "OpenEMS System Architecture")
 
 ## Getting Started
 
 * Open up a [Live-Demo on Gitpod](https://gitpod.io/#https://github.com/OpenEMS/openems)
 * Follow the [Getting Started](https://openems.github.io/openems.io/openems/latest/gettingstarted.html) guide to setup OpenEMS on your own computer
+* Please checkout our [contribution guidelines](/.github/CONTRIBUTING.md) before submitting code
 
 ## Documentation
 
@@ -78,14 +80,14 @@ If you use OpenEMS in your scientific research, please use our Zenodo Digital Ob
 * OpenEMS Edge 
 * OpenEMS Backend
 
-Copyright (C) 2016-2022 OpenEMS Association e.V.
+Copyright (C) 2016-2025 OpenEMS Association e.V.
 
 This product includes software developed at FENECON GmbH: you can
 redistribute it and/or modify it under the terms of the [Eclipse Public License version 2.0](LICENSE-EPL-2.0). 
 
  * OpenEMS UI
 
-Copyright (C) 2016-2022 OpenEMS Association e.V.
+Copyright (C) 2016-2025 OpenEMS Association e.V.
 
 This product includes software developed at FENECON GmbH: you can
 redistribute it and/or modify it under the terms of the [GNU Affero General Public License version 3](LICENSE-AGPL-3.0).

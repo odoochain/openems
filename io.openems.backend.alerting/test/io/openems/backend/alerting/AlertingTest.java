@@ -1,16 +1,19 @@
 package io.openems.backend.alerting;
 
-import static org.junit.Assert.assertEquals;
-
 import java.lang.annotation.Annotation;
 import java.util.Map;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.osgi.service.event.Event;
 
 import io.openems.backend.common.test.DummyMetadata;
 
-public class AlertingTest {
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+class AlertingTest {
+
+	private static final int HANDLER_COUNT = 2;
 
 	private static final Config testConf = new Config() {
 
@@ -28,9 +31,19 @@ public class AlertingTest {
 		public int initialDelay() {
 			return 15;
 		}
+
+		@Override
+		public boolean notifyOnOffline() {
+			return true;
+		}
+
+		@Override
+		public boolean notifyOnSumStateChange() {
+			return true;
+		}
 	};
 
-	private static Config conf = new Config() {
+	private static final Config conf = new Config() {
 		@Override
 		public Class<? extends Annotation> annotationType() {
 			throw new UnsupportedOperationException();
@@ -45,17 +58,27 @@ public class AlertingTest {
 		public int initialDelay() {
 			return 15;
 		}
+
+		@Override
+		public boolean notifyOnOffline() {
+			return true;
+		}
+
+		@Override
+		public boolean notifyOnSumStateChange() {
+			return true;
+		}
 	};
 
 	@Test
-	public void testActivateAndDeactivate() {
-		var alerting = new DummyAlerting();
+	void testActivateAndDeactivate() {
+		final var alerting = new DummyAlerting();
 		alerting.metadata = new DummyMetadata();
 
 		// Activate
 		alerting.activate(conf);
 
-		assertEquals(1, alerting.handlerCount());
+		assertEquals(HANDLER_COUNT, alerting.handlerCount());
 
 		// Deactivate
 		alerting.deactivate();
@@ -64,13 +87,13 @@ public class AlertingTest {
 	}
 
 	@Test
-	public void testHandleEvent() {
+	void testHandleEvent() {
 		final var alerting = new DummyAlerting();
 		final var event = new Event("TestEvent", Map.of());
 
 		alerting.activate(testConf);
 
-		assertEquals(null, alerting.lastEvent);
+        assertNull(alerting.lastEvent);
 
 		alerting.handleEvent(event);
 
@@ -86,10 +109,7 @@ public class AlertingTest {
 		}
 
 		private int handlerCount() {
-			if (super.handlers == null) {
-				return 0;
-			}
-			return super.handlers.length;
+			return super.handler.size();
 		}
 
 		@Override

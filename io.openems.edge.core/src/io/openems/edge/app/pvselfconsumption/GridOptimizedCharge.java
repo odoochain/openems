@@ -30,13 +30,14 @@ import io.openems.edge.core.appmanager.AppConfiguration;
 import io.openems.edge.core.appmanager.AppDescriptor;
 import io.openems.edge.core.appmanager.ComponentUtil;
 import io.openems.edge.core.appmanager.ConfigurationTarget;
-import io.openems.edge.core.appmanager.JsonFormlyUtil;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.InputBuilder.Type;
 import io.openems.edge.core.appmanager.Nameable;
 import io.openems.edge.core.appmanager.OpenemsApp;
 import io.openems.edge.core.appmanager.OpenemsAppCardinality;
 import io.openems.edge.core.appmanager.OpenemsAppCategory;
 import io.openems.edge.core.appmanager.TranslationUtil;
+import io.openems.edge.core.appmanager.dependency.Tasks;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.SchedulerByCentralOrderConfiguration.SchedulerComponent;
+import io.openems.edge.core.appmanager.formly.JsonFormlyUtil;
 
 /**
  * Describes a App for a Grid Optimized Charge.
@@ -66,7 +67,9 @@ public class GridOptimizedCharge extends AbstractEnumOpenemsApp<Property> implem
 		CTRL_GRID_OPTIMIZED_CHARGE_ID,
 		// Properties
 		ALIAS, //
+		@Deprecated
 		SELL_TO_GRID_LIMIT_ENABLED, //
+		@Deprecated
 		MAXIMUM_SELL_TO_GRID_POWER, //
 		MODE, //
 		;
@@ -86,35 +89,27 @@ public class GridOptimizedCharge extends AbstractEnumOpenemsApp<Property> implem
 					"ctrlGridOptimizedCharge0");
 
 			final var alias = this.getValueOrDefault(p, Property.ALIAS, this.getName(l));
-			final var sellToGridLimitEnabled = EnumUtils.getAsOptionalBoolean(p, Property.SELL_TO_GRID_LIMIT_ENABLED)
-					.orElse(true);
-			final var mode = EnumUtils.getAsOptionalString(p, Property.MODE)
-					.orElse(sellToGridLimitEnabled ? "AUTOMATIC" : "OFF");
-
-			final int maximumSellToGridPower;
-			if (sellToGridLimitEnabled) {
-				maximumSellToGridPower = EnumUtils.getAsInt(p, Property.MAXIMUM_SELL_TO_GRID_POWER);
-			} else {
-				maximumSellToGridPower = 0;
-			}
+			final var mode = EnumUtils.getAsOptionalString(p, Property.MODE).orElse("AUTOMATIC");
 
 			var components = Lists.newArrayList(//
 					new EdgeConfig.Component(ctrlGridOptimizedChargeId, alias, "Controller.Ess.GridOptimizedCharge",
 							JsonUtils.buildJsonObject() //
 									.addProperty("enabled", true) //
+									// Value got migrated to Meta#maximumGridFeedInLimit
+									.addProperty("maximumSellToGridPower", -1) //
 									.onlyIf(t == ConfigurationTarget.ADD, //
 											j -> j.addProperty("ess.id", "ess0") //
 													.addProperty("meter.id", "meter0"))
-									.addProperty("sellToGridLimitEnabled", sellToGridLimitEnabled) //
-									// always set the maximumSellToGridPower value
-									.addProperty("maximumSellToGridPower", maximumSellToGridPower) //
 									.onlyIf(t != ConfigurationTarget.VALIDATE, j -> j.addProperty("mode", mode))//
 									.build()) //
 			);
 
-			var schedulerExecutionOrder = Lists.newArrayList("ctrlGridOptimizedCharge0", "ctrlEssSurplusFeedToGrid0");
-
-			return new AppConfiguration(components, schedulerExecutionOrder);
+			return AppConfiguration.create() //
+					.addTask(Tasks.component(components)) //
+					.addTask(Tasks.schedulerByCentralOrder(//
+							new SchedulerComponent(ctrlGridOptimizedChargeId, "Controller.Ess.GridOptimizedCharge",
+									this.getAppId()))) //
+					.build();
 		};
 	}
 
@@ -123,18 +118,6 @@ public class GridOptimizedCharge extends AbstractEnumOpenemsApp<Property> implem
 		var bundle = AbstractOpenemsApp.getTranslationBundle(language);
 		return AppAssistant.create(this.getName(language)) //
 				.fields(JsonUtils.buildJsonArray() //
-						.add(JsonFormlyUtil.buildCheckbox(Property.SELL_TO_GRID_LIMIT_ENABLED) //
-								.setLabel(TranslationUtil.getTranslation(bundle,
-										this.getAppId() + ".sellToGridLimitEnabled.label")) //
-								.build())
-						.add(JsonFormlyUtil.buildInput(Property.MAXIMUM_SELL_TO_GRID_POWER) //
-								.setInputType(Type.NUMBER) //
-								.isRequired(true) //
-								.setMin(0) //
-								.onlyShowIfChecked(Property.SELL_TO_GRID_LIMIT_ENABLED) //
-								.setLabel(TranslationUtil.getTranslation(bundle,
-										this.getAppId() + ".maximumSellToGridPower.label")) //
-								.build())
 						.add(JsonFormlyUtil.buildSelect(Property.MODE) //
 								.setLabel(TranslationUtil.getTranslation(bundle, this.getAppId() + ".mode.label")) //
 								.setOptions(getModeOptions(bundle)) //
@@ -155,12 +138,6 @@ public class GridOptimizedCharge extends AbstractEnumOpenemsApp<Property> implem
 						TranslationUtil.getTranslation(bundle, "App.PvSelfConsumption.GridOptimizedCharge.mode.manual"),
 						"MANUAL") //
 		);
-	}
-
-	@Override
-	public AppDescriptor getAppDescriptor() {
-		return AppDescriptor.create() //
-				.build();
 	}
 
 	@Override

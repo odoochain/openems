@@ -1,6 +1,6 @@
 package io.openems.common.utils;
 
-import java.util.function.Predicate;
+import java.util.OptionalInt;
 import java.util.regex.Pattern;
 
 import com.google.gson.JsonElement;
@@ -9,6 +9,26 @@ import com.google.gson.JsonElement;
  * Provides static helper functions for string manipulation.
  */
 public class StringUtils {
+
+	/**
+	 * Checks if a string is null or empty.
+	 *
+	 * @param s the string
+	 * @return true if the string is null or empty
+	 */
+	public static boolean isNullOrEmpty(String s) {
+		return s == null || s.isEmpty();
+	}
+
+	/**
+	 * Checks if a string is null or blank (empty or only white-space).
+	 *
+	 * @param s the string
+	 * @return true if the string is null or blank
+	 */
+	public static boolean isNullOrBlank(String s) {
+		return s == null || s.isBlank();
+	}
 
 	/**
 	 * Shortens a string to a given length.
@@ -89,32 +109,7 @@ public class StringUtils {
 		}
 	}
 
-	private static final Predicate<String> DETECT_INTEGER_PATTERN = //
-			Pattern.compile("^[-+]?[0-9]+$").asPredicate();
-	private static final Predicate<String> DETECT_FLOAT_PATTERN = //
-			Pattern.compile("^[-+]?[0-9]*\\.[0-9]+$").asPredicate();
-
-	/**
-	 * Checks if the given string matches an Integer pattern, i.e. if could be
-	 * parsed to Integer/Long.
-	 * 
-	 * @param string a string
-	 * @return true if it matches Integer
-	 */
-	public static boolean matchesIntegerPattern(String string) {
-		return DETECT_INTEGER_PATTERN.test(string);
-	}
-
-	/**
-	 * Checks if the given string matches an Float pattern, i.e. if could be parsed
-	 * to Float/Double.
-	 * 
-	 * @param string a string
-	 * @return true if it matches Float
-	 */
-	public static boolean matchesFloatPattern(String string) {
-		return DETECT_FLOAT_PATTERN.test(string);
-	}
+	private static final Pattern NAME_NUMBER_PATTERN = Pattern.compile("\\D++(\\d++)$");
 
 	/**
 	 * Causes this character sequence to be replaced by the reverse of the sequence.
@@ -138,4 +133,96 @@ public class StringUtils {
 		return string != null && string.contains(value);
 	}
 
+	/**
+	 * Checks if the search string is included in the string ignoring case.
+	 * 
+	 * @param str       the string to check
+	 * @param searchStr the sequence to search for
+	 * @return true if the string contains the search string ignoring case
+	 */
+	public static boolean containsIgnoreCase(String str, String searchStr) {
+		if (str == null || searchStr == null) {
+			return false;
+		}
+
+		final int length = searchStr.length();
+		if (length == 0) {
+			return true;
+		}
+
+		for (int i = str.length() - length; i >= 0; i--) {
+			if (str.regionMatches(true, i, searchStr, 0, length)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Returns the 'alternative' if 'original' is null or blank.
+	 *
+	 * @param original    the original value, can be null, empty or filled with
+	 *                    white-space only
+	 * @param alternative the alternative value
+	 * @return either the 'defined' value (not null, not empty, not only
+	 *         white-space), alternatively the 'orElse' value
+	 */
+	public static String definedOrElse(String original, String alternative) {
+		if (original != null && !original.isBlank()) {
+			return original;
+		}
+		return alternative;
+	}
+
+	/**
+	 * Parses the number of an Edge from its name string.
+	 *
+	 * <p>
+	 * e.g. translates "edge0" to "0".
+	 *
+	 * @param name the edge name
+	 * @return the number or empty optional if there is no number in the name or if
+	 *         the name is null
+	 */
+	public static OptionalInt parseNumberFromName(String name) {
+		if (name == null) {
+			return OptionalInt.empty();
+		}
+		try {
+			var matcher = NAME_NUMBER_PATTERN.matcher(name);
+			if (matcher.find()) {
+				var nameNumberString = matcher.group(1);
+				return OptionalInt.of(Integer.parseInt(nameNumberString));
+			}
+		} catch (NullPointerException e) {
+			/* ignore */
+		}
+		return OptionalInt.empty();
+	}
+
+	/**
+	 * Returns {@code null} if the given string is {@code null} or blank, otherwise
+	 * returns the string itself.
+	 *
+	 * @param value the input string
+	 * @return {@code null} if input is {@code null} or blank, else the input string
+	 */
+	public static String emptyToNull(String value) {
+		return (value == null || value.isBlank()) ? null : value;
+	}
+
+	/**
+	 * Calls .toString() if the given obj is not null and returns the result. If the
+	 * given obj is null, elseVal is returned.
+	 *
+	 * @param obj     Value to format to string
+	 * @param elseVal Value to return if obj is null
+	 * @return String
+	 */
+	public static String toStringOrElse(Object obj, String elseVal) {
+		if (obj == null) {
+			return elseVal;
+		}
+		return obj.toString();
+	}
 }

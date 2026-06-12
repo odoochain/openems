@@ -1,8 +1,13 @@
 package io.openems.edge.app.evcs;
 
+import static io.openems.edge.core.appmanager.formly.enums.Wrappers.PANEL;
+
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Map;
+import java.util.OptionalInt;
+import java.util.UUID;
 import java.util.function.Function;
 
 import org.osgi.service.cm.ConfigurationAdmin;
@@ -23,25 +28,29 @@ import io.openems.common.function.ThrowingTriFunction;
 import io.openems.common.session.Language;
 import io.openems.common.types.EdgeConfig;
 import io.openems.common.utils.JsonUtils;
+import io.openems.edge.app.common.props.AppInstanceProps;
 import io.openems.edge.app.common.props.CommonProps;
 import io.openems.edge.app.common.props.CommunicationProps;
+import io.openems.edge.app.enums.EMobilityArchitectureType;
 import io.openems.edge.app.evcs.HardyBarthEvcs.PropertyParent;
+import io.openems.edge.app.evse.AppEvseCluster;
+import io.openems.edge.app.evse.EvseProps;
 import io.openems.edge.common.component.ComponentManager;
+import io.openems.edge.common.component.OpenemsComponent;
+import io.openems.edge.common.host.Host;
+import io.openems.edge.common.meta.Meta;
 import io.openems.edge.core.appmanager.AbstractOpenemsApp;
 import io.openems.edge.core.appmanager.AbstractOpenemsAppWithProps;
 import io.openems.edge.core.appmanager.AppConfiguration;
 import io.openems.edge.core.appmanager.AppDef;
 import io.openems.edge.core.appmanager.AppDescriptor;
+import io.openems.edge.core.appmanager.AppManagerUtil;
+import io.openems.edge.core.appmanager.AppManagerUtilSupplier;
 import io.openems.edge.core.appmanager.ComponentUtil;
 import io.openems.edge.core.appmanager.ConfigurationTarget;
+import io.openems.edge.core.appmanager.HostSupplier;
 import io.openems.edge.core.appmanager.InterfaceConfiguration;
-import io.openems.edge.core.appmanager.JsonFormlyUtil;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.Case;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.DefaultValueOptions;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.ExpressionBuilder;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.ExpressionBuilder.Operator;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.FormlyBuilder;
-import io.openems.edge.core.appmanager.JsonFormlyUtil.Wrappers;
+import io.openems.edge.core.appmanager.MetaSupplier;
 import io.openems.edge.core.appmanager.Nameable;
 import io.openems.edge.core.appmanager.OpenemsApp;
 import io.openems.edge.core.appmanager.OpenemsAppCardinality;
@@ -50,6 +59,20 @@ import io.openems.edge.core.appmanager.TranslationUtil;
 import io.openems.edge.core.appmanager.Type;
 import io.openems.edge.core.appmanager.Type.Parameter;
 import io.openems.edge.core.appmanager.Type.Parameter.BundleParameter;
+import io.openems.edge.core.appmanager.dependency.DependencyDeclaration;
+import io.openems.edge.core.appmanager.dependency.Tasks;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.ComponentDef;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.SchedulerByCentralOrderConfiguration.SchedulerComponent;
+import io.openems.edge.core.appmanager.flag.Flag;
+import io.openems.edge.core.appmanager.flag.Flags.SwitchFlag;
+import io.openems.edge.core.appmanager.formly.Case;
+import io.openems.edge.core.appmanager.formly.DefaultValueOptions;
+import io.openems.edge.core.appmanager.formly.Exp;
+import io.openems.edge.core.appmanager.formly.JsonFormlyUtil;
+import io.openems.edge.core.appmanager.formly.builder.FormlyBuilder;
+import io.openems.edge.core.appmanager.formly.expression.StringExpression;
+import io.openems.edge.core.appmanager.jsonrpc.CanSwitchEvcsEvse;
+import io.openems.edge.core.appmanager.jsonrpc.SwitchEvcsEvse;
 
 /**
  * Describes a Hardy Barth evcs App.
@@ -64,6 +87,7 @@ import io.openems.edge.core.appmanager.Type.Parameter.BundleParameter;
       "EVCS_ID": "evcs0",
       "CTRL_EVCS_ID": "ctrlEvcs0",
       "IP": "192.168.25.30",
+      "PHASE_ROTATION":"L1_L2_L3",
       "NUMBER_OF_CHARGING_STATIONS": 1,
       "EVCS_ID_CP_2": "evcs0",
       "CTRL_EVCS_ID_CP_2": "ctrlEvcs0",
@@ -77,8 +101,9 @@ import io.openems.edge.core.appmanager.Type.Parameter.BundleParameter;
  * </pre>
  */
 @Component(name = "App.Evcs.HardyBarth")
-public class HardyBarthEvcs extends
-		AbstractOpenemsAppWithProps<HardyBarthEvcs, PropertyParent, Parameter.BundleParameter> implements OpenemsApp {
+public class HardyBarthEvcs
+		extends AbstractOpenemsAppWithProps<HardyBarthEvcs, PropertyParent, Parameter.BundleParameter>
+		implements OpenemsApp, HostSupplier, MetaSupplier, AppManagerUtilSupplier {
 
 	public interface PropertyParent extends Nameable, Type<PropertyParent, HardyBarthEvcs, Parameter.BundleParameter> {
 
@@ -90,36 +115,71 @@ public class HardyBarthEvcs extends
 		CTRL_EVCS_ID(AppDef.componentId("ctrlEvcs0")), //
 		EVCS_ID_CP_2(AppDef.componentId("evcs0")), //
 		CTRL_EVCS_ID_CP_2(AppDef.componentId("ctrlEvcs0")), //
+		CTRL_SINGLE_ID(AppDef.componentId("ctrlEvseSingle0")), //
+		CTRL_SINGLE_ID_CP_2(AppDef.componentId("ctrlEvseSingle0")), //
+
+		ARCHITECTURE_TYPE(EvcsProps.architectureType(EVCS_ID)), //
+
 		// Properties
-		NUMBER_OF_CHARGING_STATIONS(AppDef.of(HardyBarthEvcs.class) //
-				.setTranslatedLabelWithAppPrefix(".numberOfChargingStations.label") //
-				.setDefaultValue(1) //
-				.setField(JsonFormlyUtil::buildSelectFromNameable, (app, property, l, parameter, field) -> //
-				field.setOptions(Lists.newArrayList(1, 2), JsonPrimitive::new, JsonPrimitive::new))), //
+		// TODO maybe make this immutable after first installation?
+		NUMBER_OF_CHARGING_STATIONS(AppDef.copyOfGeneric(EvcsProps.numberOfChargePoints(2))), //
+
 		WRAPPER_FIRST_CHARGE_POINT(AppDef.of(HardyBarthEvcs.class) //
 				.setTranslatedLabel("App.Evcs.chargingStation.label", 1)
 				.setField(JsonFormlyUtil::buildFieldGroupFromNameable, (app, property, l, parameter, field) -> {
-					field.addWrapper(Wrappers.PANEL) //
-							.setFieldGroup(SubPropertyFirstChargepoint.fields(app, l, parameter)) //
-							.setLabelExpression(
-									ExpressionBuilder.of(Property.NUMBER_OF_CHARGING_STATIONS, Operator.EQ, "1"), //
-									"", TranslationUtil.getTranslation(parameter.bundle,
-											"App.Evcs.chargingStation.label", 1))
-							.hideKey(); //
+					field.addWrapper(PANEL)//
+							.setFieldGroup(SubPropertyFirstChargepoint.fields(app, l, parameter))//
+							.setLabelExpression(Exp.ifElse(
+									Exp.currentModelValue(Property.NUMBER_OF_CHARGING_STATIONS)
+											.equal(Exp.staticValue(1)),
+									StringExpression.of(""), //
+									StringExpression.of(TranslationUtil.getTranslation(parameter.bundle,
+											"App.Evcs.chargingStation.label", 1))))
+							.hideKey();//
 				})), //
 		WRAPPER_SECOND_CHARGE_POINT(AppDef.of(HardyBarthEvcs.class) //
 				.setTranslatedLabel("App.Evcs.chargingStation.label", 2)
 				.setField(JsonFormlyUtil::buildFieldGroupFromNameable, (app, property, l, parameter, field) -> {
-					field.addWrapper(Wrappers.PANEL) //
-							.setFieldGroup(SubPropertySecondChargepoint.fields(app, l, parameter)) //
-							.onlyShowIfValueEquals(NUMBER_OF_CHARGING_STATIONS, "2") //
+					field.addWrapper(PANEL)//
+							.setFieldGroup(SubPropertySecondChargepoint.fields(app, l, parameter))//
+							.onlyShowIf(Exp.currentModelValue(NUMBER_OF_CHARGING_STATIONS)//
+									.equal(Exp.staticValue(2)))
 							.hideKey();
 				})), //
-		;
+		MAX_HARDWARE_POWER_ACCEPT_PROPERTY(AppDef.of()//
+				.setAllowedToSave(false)), //
+		MAX_HARDWARE_POWER(AppDef.copyOfGeneric(EvcsProps.clusterMaxHardwarePower(MAX_HARDWARE_POWER_ACCEPT_PROPERTY),
+				def -> def //
+						.setDefaultValue(0) //
+						.wrapField((app, property, l, parameter, field) -> {
+							final var existingEvcs = EvcsProps.getEvcsComponents(app.componentUtil);
+							final var archTypeCheck = Exp.currentModelValue(ARCHITECTURE_TYPE)//
+									.equal(Exp.staticValue(EMobilityArchitectureType.EVCS));
 
-		private final AppDef<HardyBarthEvcs, PropertyParent, BundleParameter> def;
+							if (existingEvcs.isEmpty()) {
+								field.onlyShowIf(archTypeCheck.and(Exp.currentModelValue(NUMBER_OF_CHARGING_STATIONS)//
+										.equal(Exp.staticValue(2))));
+								return;
+							}
+							final var subCpCheck = Exp.currentModelValue(NUMBER_OF_CHARGING_STATIONS)//
+									.equal(Exp.staticValue(2))//
+									.or(existingEvcs.stream().map(OpenemsComponent::id)//
+											.map(Exp::staticValue)//
+											.collect(Exp.toArrayExpression())//
+											.every(i -> Exp.currentModelValue(EVCS_ID).notEqual(i)));
+							field.onlyShowIf(archTypeCheck.and(subCpCheck));
+						}))
 
-		private Property(AppDef<HardyBarthEvcs, PropertyParent, BundleParameter> def) {
+		), //
+		PHASE_ROTATION(AppDef.copyOfGeneric(EvcsProps.phaseRotation())), //
+		READ_ONLY(EvcsProps.readOnly().wrapField((app, property, l, parameter, field) -> {
+			field.onlyShowIf(Exp.currentModelValue(ARCHITECTURE_TYPE)//
+					.equal(Exp.staticValue(EMobilityArchitectureType.EVCS)));
+		}));
+
+		private final AppDef<? super HardyBarthEvcs, ? super PropertyParent, ? super BundleParameter> def;
+
+		private Property(AppDef<? super HardyBarthEvcs, ? super PropertyParent, ? super BundleParameter> def) {
 			this.def = def;
 		}
 
@@ -129,7 +189,7 @@ public class HardyBarthEvcs extends
 		}
 
 		@Override
-		public AppDef<HardyBarthEvcs, PropertyParent, BundleParameter> def() {
+		public AppDef<? super HardyBarthEvcs, ? super PropertyParent, ? super BundleParameter> def() {
 			return this.def;
 		}
 
@@ -143,24 +203,39 @@ public class HardyBarthEvcs extends
 	public enum SubPropertyFirstChargepoint implements PropertyParent {
 		ALIAS(AppDef.copyOfGeneric(CommonProps.alias()) //
 				.setAutoGenerateField(false) //
+				.setRequired(true) //
 				.setDefaultValue((app, property, l, parameter) -> //
-				new JsonPrimitive(TranslationUtil.getTranslation(parameter.bundle, "App.Evcs.HardyBarth.alias.value", //
-						TranslationUtil.getTranslation(parameter.bundle, "right")))) //
-				.wrapField((app, property, l, parameter, field) -> field.isRequired(true) //
+				new JsonPrimitive(TranslationUtil.getTranslation(parameter.bundle(), "App.Evcs.HardyBarth.alias.value", //
+						TranslationUtil.getTranslation(parameter.bundle(), "right")))) //
+				.wrapField((app, property, l, parameter, field) -> field
 						.setDefaultValueCases(new DefaultValueOptions(Property.NUMBER_OF_CHARGING_STATIONS, //
 								new Case(1, app.getName(l)), //
-								new Case(2, TranslationUtil.getTranslation(parameter.bundle, //
+								new Case(2, TranslationUtil.getTranslation(parameter.bundle(), //
 										"App.Evcs.HardyBarth.alias.value", //
-										TranslationUtil.getTranslation(parameter.bundle, "right"))))))), //
-		IP(AppDef.copyOfGeneric(CommunicationProps.ip()) //
-				.setDefaultValue("192.168.25.30") //
+										TranslationUtil.getTranslation(parameter.bundle(), "right"))))))), //
+		IP(AppDef.copyOfGeneric(CommunicationProps.excludingIp())//
+				.setDefaultValue("192.168.25.30")//
+				.setAutoGenerateField(false)//
+				.setRequired(true)), //
+		CONFIGURE_VEHICLE(EvseProps.configureVehicle().wrapField((app, property, l, parameter, field) -> {
+			field.onlyShowIf(Exp.currentModelValue(Property.ARCHITECTURE_TYPE)//
+					.equal(Exp.staticValue(EMobilityArchitectureType.EVSE)));
+		})), //
+		ELECTRIC_VEHICLE_ID(AppInstanceProps.pickInstanceId("App.Evse.ElectricVehicle.Generic")//
+				.setRequired(true) //
 				.setAutoGenerateField(false) //
-				.wrapField((app, property, l, parameter, field) -> field.isRequired(true))), //
+				.setTranslatedLabel("App.Evse.pickVehicleId.label")//
+				.setTranslatedDescription("App.Evse.pickVehicleId.description") //
+				.wrapField((app, property, l, parameter, field) -> {
+					field.onlyShowIf(Exp.currentModelValue(Property.ARCHITECTURE_TYPE)//
+							.equal(Exp.staticValue(EMobilityArchitectureType.EVSE)));
+				})), //
 		;
 
-		private final AppDef<OpenemsApp, Nameable, BundleParameter> def;
+		private final AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def;
 
-		private SubPropertyFirstChargepoint(AppDef<OpenemsApp, Nameable, BundleParameter> def) {
+		private SubPropertyFirstChargepoint(
+				AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def) {
 			this.def = def;
 		}
 
@@ -169,7 +244,7 @@ public class HardyBarthEvcs extends
 		 * 
 		 * @return the {@link AppDef}
 		 */
-		public AppDef<OpenemsApp, Nameable, BundleParameter> def() {
+		public AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def() {
 			return this.def;
 		}
 
@@ -204,18 +279,28 @@ public class HardyBarthEvcs extends
 		ALIAS_CP_2(AppDef.copyOfGeneric(CommonProps.alias()) //
 				.setAutoGenerateField(false) //
 				.setDefaultValue((app, property, l, parameter) -> //
-				new JsonPrimitive(TranslationUtil.getTranslation(parameter.bundle, "App.Evcs.HardyBarth.alias.value", //
-						TranslationUtil.getTranslation(parameter.bundle, "left")))) //
-				.wrapField((app, property, l, parameter, field) -> field.isRequired(true))), //
-		IP_CP_2(AppDef.copyOfGeneric(CommunicationProps.ip()) //
-				.setDefaultValue("192.168.25.31") //
+				new JsonPrimitive(TranslationUtil.getTranslation(parameter.bundle(), "App.Evcs.HardyBarth.alias.value", //
+						TranslationUtil.getTranslation(parameter.bundle(), "left"))))//
+				.setRequired(true)), //
+		IP_CP_2(AppDef.copyOfGeneric(CommunicationProps.excludingIp())//
+				.setDefaultValue("192.168.25.31")//
+				.setAutoGenerateField(false)//
+				.setRequired(true)), //
+		ELECTRIC_VEHICLE_ID_CP_2(AppInstanceProps.pickInstanceId("App.Evse.ElectricVehicle.Generic")//
+				.setRequired(true) //
 				.setAutoGenerateField(false) //
-				.wrapField((app, property, l, parameter, field) -> field.isRequired(true))), //
+				.setTranslatedLabel("App.Evse.pickVehicleId.label")//
+				.setTranslatedDescription("App.Evse.pickVehicleId.description") //
+				.wrapField((app, property, l, parameter, field) -> {
+					field.onlyShowIf(Exp.currentModelValue(Property.ARCHITECTURE_TYPE)//
+							.equal(Exp.staticValue(EMobilityArchitectureType.EVSE)));
+				})), //
 		;
 
-		private final AppDef<OpenemsApp, Nameable, BundleParameter> def;
+		private final AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def;
 
-		private SubPropertySecondChargepoint(AppDef<OpenemsApp, Nameable, BundleParameter> def) {
+		private SubPropertySecondChargepoint(
+				AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def) {
 			this.def = def;
 		}
 
@@ -224,7 +309,7 @@ public class HardyBarthEvcs extends
 		 * 
 		 * @return the {@link AppDef}
 		 */
-		public AppDef<OpenemsApp, Nameable, BundleParameter> def() {
+		public AppDef<? super HardyBarthEvcs, ? super Nameable, ? super BundleParameter> def() {
 			return this.def;
 		}
 
@@ -255,10 +340,24 @@ public class HardyBarthEvcs extends
 
 	}
 
+	private final Host host;
+	private final Meta meta;
+	private final AppManagerUtil appManagerUtil;
+
 	@Activate
-	public HardyBarthEvcs(@Reference ComponentManager componentManager, ComponentContext componentContext,
-			@Reference ConfigurationAdmin cm, @Reference ComponentUtil componentUtil) {
+	public HardyBarthEvcs(//
+			@Reference ComponentManager componentManager, //
+			ComponentContext componentContext, //
+			@Reference ConfigurationAdmin cm, //
+			@Reference ComponentUtil componentUtil, //
+			@Reference AppManagerUtil appManagerUtil, //
+			@Reference Host host, //
+			@Reference Meta meta //
+	) {
 		super(componentManager, componentContext, cm, componentUtil);
+		this.host = host;
+		this.meta = meta;
+		this.appManagerUtil = appManagerUtil;
 	}
 
 	@Override
@@ -276,58 +375,183 @@ public class HardyBarthEvcs extends
 				throw new OpenemsException("Number of charging stations can only be 0 < n <= 2.");
 			}
 
-			final var schedulerIds = new ArrayList<String>();
-
-			final var alias = this.getString(p, l, SubPropertyFirstChargepoint.ALIAS);
-			final var ip = this.getString(p, l, SubPropertyFirstChargepoint.IP);
-			final var evcsId = this.getId(t, p, Property.EVCS_ID);
-			final var ctrlEvcsId = this.getId(t, p, Property.CTRL_EVCS_ID);
-			schedulerIds.add(ctrlEvcsId);
-
-			final var factorieId = "Evcs.HardyBarth";
-			final var components = Lists.newArrayList(//
-					new EdgeConfig.Component(evcsId, alias, factorieId, JsonUtils.buildJsonObject() //
-							.addProperty("ip", ip) //
-							.build()), //
-					new EdgeConfig.Component(ctrlEvcsId, controllerAlias, "Controller.Evcs", JsonUtils.buildJsonObject() //
-							.addProperty("evcs.id", evcsId) //
-							.build())//
-			);
-
-			if (numberOfChargingStations == 2) {
-				final var aliasCp2 = this.getString(p, l, SubPropertySecondChargepoint.ALIAS_CP_2);
-				final var ipCp2 = this.getString(p, l, SubPropertySecondChargepoint.IP_CP_2);
-				final var evcsIdCp2 = this.getId(t, p, Property.EVCS_ID_CP_2);
-				final var ctrlEvcsIdCp2 = this.getId(t, p, Property.CTRL_EVCS_ID_CP_2);
-				schedulerIds.add(ctrlEvcsIdCp2);
-
-				components.add(new EdgeConfig.Component(evcsIdCp2, aliasCp2, factorieId, JsonUtils.buildJsonObject() //
-						.addProperty("ip", ipCp2) //
-						.build()));
-				components.add(new EdgeConfig.Component(ctrlEvcsIdCp2, controllerAlias, "Controller.Evcs",
-						JsonUtils.buildJsonObject() //
-								.addProperty("evcs.id", evcsIdCp2) //
-								.build()));
+			var maxHardwarePowerPerPhase = OptionalInt.empty();
+			if (p.containsKey(Property.MAX_HARDWARE_POWER)) {
+				maxHardwarePowerPerPhase = OptionalInt.of(this.getInt(p, Property.MAX_HARDWARE_POWER));
 			}
 
-			final var ips = Lists.newArrayList(//
-					new InterfaceConfiguration("eth0") //
-							.addIp("Evcs", "192.168.25.10/24") //
-			);
+			final var schedulerIds = new ArrayList<SchedulerComponent>();
 
-			schedulerIds.add("ctrlBalancing0");
-			return new AppConfiguration(//
-					components, //
-					schedulerIds, //
-					ip.startsWith("192.168.25.") ? ips : null //
-			);
+			final var alias = this.getString(p, l, SubPropertyFirstChargepoint.ALIAS);
+			final var ip = this.getString(p, SubPropertyFirstChargepoint.IP);
+			final var evcsId = this.getId(t, p, Property.EVCS_ID);
+			final var phaseRotation = this.getString(p, Property.PHASE_ROTATION);
+			final var readOnly = this.getBoolean(p, Property.READ_ONLY);
+
+			final var factorieId = "Evcs.HardyBarth";
+
+			final var architectureType = this.getEnum(p, EMobilityArchitectureType.class, Property.ARCHITECTURE_TYPE);
+
+			final var appConfigBuilder = AppConfiguration.create();
+			switch (architectureType) {
+			case EVCS -> {
+				final var components = Lists.newArrayList(//
+						new EdgeConfig.Component(evcsId, alias, factorieId, JsonUtils.buildJsonObject() //
+								.addProperty("ip", ip) //
+								.addPropertyIfNotNull("phaseRotation", phaseRotation) //
+								.addPropertyIfNotNull("readOnly", readOnly)//
+								.build())); //
+				if (!readOnly) {
+					final var ctrlEvcsId = this.getId(t, p, Property.CTRL_EVCS_ID);
+					schedulerIds.add(new SchedulerComponent(ctrlEvcsId, "Controller.Evcs", this.getAppId()));
+					components.add(new EdgeConfig.Component(ctrlEvcsId, controllerAlias, "Controller.Evcs",
+							JsonUtils.buildJsonObject() //
+									.addProperty("evcs.id", evcsId) //
+									.build())//
+					);
+				}
+				if (numberOfChargingStations == 2) {
+					final var aliasCp2 = this.getString(p, l, SubPropertySecondChargepoint.ALIAS_CP_2);
+					final var ipCp2 = this.getString(p, l, SubPropertySecondChargepoint.IP_CP_2);
+					final var evcsIdCp2 = this.getId(t, p, Property.EVCS_ID_CP_2);
+					components.add(new EdgeConfig.Component(evcsIdCp2, aliasCp2, factorieId, JsonUtils.buildJsonObject() //
+							.addProperty("ip", ipCp2) //
+							.addPropertyIfNotNull("phaseRotation", phaseRotation) //
+							.addPropertyIfNotNull("readOnly", readOnly) //
+							.build()));
+
+					if (!readOnly) {
+						final var ctrlEvcsIdCp2 = this.getId(t, p, Property.CTRL_EVCS_ID_CP_2);
+						schedulerIds.add(new SchedulerComponent(ctrlEvcsIdCp2, "Controller.Evcs", this.getAppId()));
+
+						components.add(new EdgeConfig.Component(ctrlEvcsIdCp2, controllerAlias, "Controller.Evcs",
+								JsonUtils.buildJsonObject() //
+										.addProperty("evcs.id", evcsIdCp2) //
+										.build()));
+						appConfigBuilder.addDependencies(EvcsCluster.dependency(t, this.componentManager,
+								this.componentUtil, maxHardwarePowerPerPhase, evcsId, evcsIdCp2));
+					}
+				} else {
+					if (!readOnly) {
+						var removeIds = Collections.<String>emptyList();
+						if (p.containsKey(Property.EVCS_ID_CP_2)) {
+							removeIds = Lists.newArrayList(this.getId(t, p, Property.EVCS_ID_CP_2));
+						}
+						appConfigBuilder.addDependencies(EvcsCluster.dependency(t, this.componentManager,
+								this.componentUtil, maxHardwarePowerPerPhase, removeIds, evcsId));
+					}
+				}
+
+				if (!readOnly) {
+					appConfigBuilder.addTask(Tasks.schedulerByCentralOrder(schedulerIds)); //
+				}
+				appConfigBuilder //
+						.addTask(Tasks.component(components)); //
+			}
+			case EVSE -> {
+				var vehicleId = UUID.fromString(this.getString(p, SubPropertyFirstChargepoint.ELECTRIC_VEHICLE_ID));
+				final var components = Lists.newArrayList(//
+						new EdgeConfig.Component(evcsId, alias, "Evse.ChargePoint.HardyBarth",
+								JsonUtils.buildJsonObject() //
+										.addProperty("ip", ip) //
+										.addPropertyIfNotNull("phaseRotation", phaseRotation) //
+										.build()));
+
+				var instance = this.appManagerUtil.findInstanceById(vehicleId);
+				var vehicleComponentId = "";
+				if (instance.isPresent()) {
+					var appConfiguration = this.appManagerUtil.getAppConfiguration(ConfigurationTarget.VALIDATE,
+							instance.get(), l);
+					vehicleComponentId = appConfiguration.getComponents().stream().map(b -> b.id())
+							.filter(b -> b.startsWith("evseElectricVehicle")).findFirst().get();
+				} else if (!t.isDeleteOrTest()) {
+					throw new RuntimeException("Unable to find Vehicle-App Instance");
+				}
+
+				var ctrlSingleId = this.getId(t, p, Property.CTRL_SINGLE_ID);
+
+				components.add(new EdgeConfig.Component(ctrlSingleId, alias, "Evse.Controller.Single",
+						JsonUtils.buildJsonObject()//
+								.addProperty("electricVehicle.id", vehicleComponentId)//
+								.addProperty("chargePoint.id", evcsId)//
+								.build()));
+
+				final var dependencies = Lists.newArrayList(new DependencyDeclaration("VEHICLE", //
+						DependencyDeclaration.CreatePolicy.NEVER, //
+						DependencyDeclaration.UpdatePolicy.NEVER, //
+						DependencyDeclaration.DeletePolicy.NEVER, //
+						DependencyDeclaration.DependencyUpdatePolicy.ALLOW_ALL, //
+						DependencyDeclaration.DependencyDeletePolicy.NOT_ALLOWED, //
+						DependencyDeclaration.AppDependencyConfig.create() //
+								.setSpecificInstanceId(vehicleId) //
+								.build()) //
+				);
+
+				var ctrlIds = new ArrayList<String>();
+				ctrlIds.add(ctrlSingleId);
+
+				if (numberOfChargingStations == 2) {
+					final var evcsIdCp2 = this.getId(t, p, Property.EVCS_ID_CP_2);
+					final var ipCp2 = this.getString(p, SubPropertySecondChargepoint.IP_CP_2);
+					final var aliasCp2 = this.getString(p, SubPropertySecondChargepoint.ALIAS_CP_2);
+
+					components.add(new EdgeConfig.Component(evcsIdCp2, aliasCp2, "Evse.ChargePoint.HardyBarth",
+							JsonUtils.buildJsonObject() //
+									.addProperty("ip", ipCp2) //
+									.addPropertyIfNotNull("phaseRotation", phaseRotation) //
+									.build()));
+
+					final var vehicleIdCp2 = UUID
+							.fromString(this.getString(p, SubPropertySecondChargepoint.ELECTRIC_VEHICLE_ID_CP_2));
+					final var instanceCp2 = this.appManagerUtil.findInstanceById(vehicleIdCp2);
+					var vehicleComponentIdCp2 = "";
+					if (instanceCp2.isPresent()) {
+						var appConfiguration = this.appManagerUtil.getAppConfiguration(ConfigurationTarget.VALIDATE,
+								instanceCp2.get(), l);
+						vehicleComponentIdCp2 = appConfiguration.getComponents().stream().map(ComponentDef::id)
+								.filter(b -> b.startsWith("evseElectricVehicle")).findFirst().get();
+					} else if (!t.isDeleteOrTest()) {
+						throw new RuntimeException("Unable to find Vehicle-App Instance");
+					}
+
+					var ctrlSingleIdCp2 = this.getId(t, p, Property.CTRL_SINGLE_ID_CP_2);
+
+					components.add(new EdgeConfig.Component(ctrlSingleIdCp2, aliasCp2, "Evse.Controller.Single",
+							JsonUtils.buildJsonObject()//
+									.addProperty("electricVehicle.id", vehicleComponentIdCp2)//
+									.addProperty("chargePoint.id", evcsIdCp2)//
+									.build()));
+
+					final var dependenciesCp2 = Lists.newArrayList(new DependencyDeclaration("VEHICLE_CP_2", //
+							DependencyDeclaration.CreatePolicy.NEVER, //
+							DependencyDeclaration.UpdatePolicy.NEVER, //
+							DependencyDeclaration.DeletePolicy.NEVER, //
+							DependencyDeclaration.DependencyUpdatePolicy.ALLOW_ALL, //
+							DependencyDeclaration.DependencyDeletePolicy.NOT_ALLOWED, //
+							DependencyDeclaration.AppDependencyConfig.create() //
+									.setSpecificInstanceId(vehicleIdCp2) //
+									.build())); //
+
+					ctrlIds.add(ctrlSingleIdCp2);
+
+					appConfigBuilder.addDependencies(dependenciesCp2);
+				}
+
+				appConfigBuilder.addTask(Tasks.component(components));
+				dependencies.addAll(AppEvseCluster.dependency());
+				appConfigBuilder.addDependencies(dependencies);
+				appConfigBuilder.addTask(Tasks.cluster(ctrlIds));
+
+			}
+
+			}
+
+			return appConfigBuilder //
+					.throwingOnlyIf(ip.startsWith("192.168.25."),
+							b -> b.addTask(Tasks.staticIp(new InterfaceConfiguration("eth0") //
+									.addIp("Evcs", "192.168.25.10/24")))) //
+					.build();
 		};
-	}
-
-	@Override
-	public AppDescriptor getAppDescriptor() {
-		return AppDescriptor.create() //
-				.build();
 	}
 
 	@Override
@@ -352,6 +576,32 @@ public class HardyBarthEvcs extends
 	@Override
 	public OpenemsAppCategory[] getCategories() {
 		return new OpenemsAppCategory[] { OpenemsAppCategory.EVCS };
+	}
+
+	@Override
+	public Host getHost() {
+		return this.host;
+	}
+
+	@Override
+	public Meta getMeta() {
+		return this.meta;
+	}
+
+	@Override
+	public AppManagerUtil getAppManagerUtil() {
+		return this.appManagerUtil;
+	}
+
+	@Override
+	public Flag[] flags() {
+		final var flags = Lists.newArrayList(super.flags());
+		flags.add(new SwitchFlag(//
+				SwitchArchitecture.ID, // handler id
+				CanSwitchEvcsEvse.METHOD, // can switch method name
+				SwitchEvcsEvse.METHOD // switch method name
+		));
+		return flags.toArray(Flag[]::new);
 	}
 
 }

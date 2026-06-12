@@ -1,8 +1,9 @@
+import { States } from "../../ngrx-store/states";
 import { JsonrpcRequest } from "../base";
 
 /**
  * Represents a JSON-RPC Request to create a configuration for an OpenEMS Edge Component.
- * 
+ *
  * <pre>
  * {
  *   "jsonrpc": "2.0",
@@ -21,6 +22,7 @@ import { JsonrpcRequest } from "../base";
 export class CreateComponentConfigRequest extends JsonrpcRequest {
 
     private static METHOD: string = "createComponentConfig";
+    protected override requiredState: States = States.EDGE_SELECTED;
 
     public constructor(
         public override readonly params: {
@@ -29,7 +31,7 @@ export class CreateComponentConfigRequest extends JsonrpcRequest {
                 name: string,
                 value: any
             }[]
-        }
+        },
     ) {
         super(CreateComponentConfigRequest.METHOD, params);
     }

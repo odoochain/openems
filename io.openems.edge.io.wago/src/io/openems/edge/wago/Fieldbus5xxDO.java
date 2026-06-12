@@ -17,7 +17,7 @@ public class Fieldbus5xxDO extends FieldbusModule {
 	private final BooleanReadChannel[] readChannels;
 
 	public Fieldbus5xxDO(IoWagoImpl parent, int moduleCount, int coilOffset512, int channelsCount) {
-		var id = ID_TEMPLATE + moduleCount;
+		final var id = ID_TEMPLATE + moduleCount;
 
 		this.readChannels = new BooleanReadChannel[channelsCount];
 		this.inputCoil512Elements = new CoilElement[channelsCount];
@@ -26,7 +26,7 @@ public class Fieldbus5xxDO extends FieldbusModule {
 		for (var i = 0; i < channelsCount; i++) {
 			var doc = new BooleanDoc() //
 					.accessMode(AccessMode.READ_WRITE);
-			doc.persistencePriority(PersistencePriority.MEDIUM);
+			doc.persistencePriority(PersistencePriority.HIGH);
 			var channelId = new FieldbusChannelId(id + "_C" + (i + 1), doc);
 			var channel = (BooleanWriteChannel) parent.addChannel(channelId);
 

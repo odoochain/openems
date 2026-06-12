@@ -28,7 +28,6 @@ import com.google.common.collect.TreeMultimap;
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.types.ChannelAddress;
 import io.openems.common.utils.StringUtils;
-import io.openems.edge.common.channel.Channel;
 import io.openems.edge.common.component.AbstractOpenemsComponent;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.controller.api.Controller;
@@ -42,7 +41,7 @@ import io.openems.edge.controller.api.Controller;
 public class ControllerDebugLogImpl extends AbstractOpenemsComponent
 		implements ControllerDebugLog, Controller, OpenemsComponent {
 
-	private static final Pattern COMPONENT_ID_PATTERN = Pattern.compile("([^0-9]+)([0-9]+)$");
+	private static final Pattern COMPONENT_ID_PATTERN = Pattern.compile("(\\D++)(\\d++)$");
 
 	private final Logger log = LoggerFactory.getLogger(ControllerDebugLogImpl.class);
 	private final TreeMultimap<String, String> additionalChannels = TreeMultimap.create();
@@ -157,8 +156,12 @@ public class ControllerDebugLogImpl extends AbstractOpenemsComponent
 					// Additional Channels
 					SortedSet<String> additionalChannels = this.additionalChannels.get(component.id());
 					for (String channelId : additionalChannels) {
-						Channel<?> channel = component.channel(channelId);
-						logs.add(channelId + ":" + channel.value().asString());
+						@SuppressWarnings("deprecation")
+						var channel = component._channel(channelId);
+						logs.add(channelId + ":" //
+								+ (channel == null //
+										? "CHANNEL_IS_NOT_DEFINED" //
+										: channel.value().asString()));
 					}
 
 					// Any logs? Add them to the output

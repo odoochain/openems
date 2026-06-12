@@ -1,29 +1,37 @@
 package io.openems.backend.uiwebsocket.impl;
 
-import java.util.Collections;
+import static java.util.Collections.emptyMap;
+import static java.util.UUID.randomUUID;
+
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.UUID;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.java_websocket.WebSocket;
 
+import com.google.common.util.concurrent.RateLimiter;
 import com.google.gson.JsonElement;
 
-import io.openems.backend.common.edgewebsocket.EdgeCache;
+import io.openems.backend.common.edge.EdgeCache;
 import io.openems.backend.common.metadata.Metadata;
 import io.openems.backend.common.metadata.User;
 import io.openems.common.exceptions.OpenemsError;
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
-import io.openems.common.exceptions.OpenemsException;
 import io.openems.common.jsonrpc.notification.CurrentDataNotification;
 import io.openems.common.jsonrpc.notification.EdgeRpcNotification;
+import io.openems.common.jsonrpc.notification.LogMessageNotification;
+import io.openems.common.jsonrpc.request.EdgeRpcRequest;
 import io.openems.common.jsonrpc.request.SubscribeChannelsRequest;
 
 public class WsData extends io.openems.common.websocket.WsData {
+
+	// This list can be used to enable debug log messages for certain user ids
+	private static final List<String> DEBUG_USER_IDS = List.of();
 
 	private static class SubscribedChannels {
 
@@ -52,14 +60,11 @@ public class WsData extends io.openems.common.websocket.WsData {
 		public Map<String, JsonElement> getChannelValues(String edgeId, EdgeCache edgeCache) {
 			var subscribedChannels = this.subscribedChannels.get(edgeId);
 			if (subscribedChannels == null || subscribedChannels.isEmpty()) {
-				return Collections.emptyMap();
+				return emptyMap();
 			}
 
-			var result = new HashMap<String, JsonElement>(subscribedChannels.size());
-			for (var channel : subscribedChannels) {
-				result.put(channel, edgeCache.getChannelValue(channel));
-			}
-			return result;
+			var result = edgeCache.getChannelValues(subscribedChannels);
+			return result.a();
 		}
 
 		protected void dispose() {
@@ -67,17 +72,34 @@ public class WsData extends io.openems.common.websocket.WsData {
 		}
 	}
 
-	private final Logger log = LoggerFactory.getLogger(WsData.class);
-
-	private final WebsocketServer parent;
+	private final UUID id = randomUUID();
 	private final SubscribedChannels subscribedChannels = new SubscribedChannels();
-	private Optional<String> userId = Optional.empty();
+
 	private Optional<String> token = Optional.empty();
+	private volatile User user;
 
 	private Set<String> subscribedEdges = new HashSet<>();
 
-	public WsData(WebsocketServer parent) {
-		this.parent = parent;
+	private final RateLimiter limiterGlobal;
+	private final RateLimiter limiterLogMessages = RateLimiter.create(5);
+
+	public WsData(WebSocket ws, int requestLimit) {
+		super(ws);
+		this.limiterGlobal = RateLimiter.create(requestLimit);
+	}
+
+	/**
+	 * Check if the method can be called. Or if it is rate limited.
+	 * 
+	 * @param method to check
+	 * @return true if the method can be called
+	 */
+	public boolean checkLimiter(String method) {
+		return switch (method) {
+		case EdgeRpcRequest.METHOD -> true;
+		case LogMessageNotification.METHOD -> this.limiterLogMessages.tryAcquire();
+		case null, default -> this.limiterGlobal.tryAcquire();
+		};
 	}
 
 	/**
@@ -85,19 +107,15 @@ public class WsData extends io.openems.common.websocket.WsData {
 	 */
 	public void logout() {
 		this.unsetToken();
-		this.unsetUserId();
+		this.setUser(null);
 		this.subscribedChannels.dispose();
 	}
 
-	public synchronized void setUserId(String userId) {
-		this.userId = Optional.ofNullable(userId);
-	}
-
-	/**
-	 * Unsets the User-Token.
-	 */
-	public synchronized void unsetUserId() {
-		this.userId = Optional.empty();
+	public void setUser(User user) {
+		super.setDebug(user == null //
+				? false //
+				: DEBUG_USER_IDS.contains(user.getUserId()));
+		this.user = user;
 	}
 
 	/**
@@ -106,7 +124,11 @@ public class WsData extends io.openems.common.websocket.WsData {
 	 * @return the User-ID or Optional.Empty if the User was not authenticated.
 	 */
 	public synchronized Optional<String> getUserId() {
-		return this.userId;
+		return Optional.ofNullable(this.user).map(User::getUserId);
+	}
+
+	public User getUser() {
+		return this.user;
 	}
 
 	/**
@@ -159,14 +181,15 @@ public class WsData extends io.openems.common.websocket.WsData {
 	}
 
 	@Override
-	public String toString() {
-		String tokenString;
-		if (this.token.isPresent()) {
-			tokenString = this.token.get().toString();
-		} else {
-			tokenString = "UNKNOWN";
-		}
-		return "UiWebsocket.WsData [userId=" + this.userId.orElse("UNKNOWN") + ", token=" + tokenString + "]";
+	protected String toLogString() {
+		return new StringBuilder("UiWebsocket.WsData [userId=") //
+				.append(this.getUserId().orElse("UNKNOWN")) //
+				.append(", token=") //
+				.append(this.token.isPresent() //
+						? this.token.get().toString() //
+						: "UNKNOWN") //
+				.append("]") //
+				.toString();
 	}
 
 	/**
@@ -185,6 +208,7 @@ public class WsData extends io.openems.common.websocket.WsData {
 	 * @param edgeIds the edges to subscribe
 	 */
 	public void handleSubscribeEdgesRequest(Set<String> edgeIds) {
+		// TODO maybe only add and remove on explicit request
 		this.subscribedEdges = edgeIds;
 	}
 
@@ -202,16 +226,9 @@ public class WsData extends io.openems.common.websocket.WsData {
 		if (values.isEmpty()) {
 			return;
 		}
-		try {
-			this.send(//
-					new EdgeRpcNotification(edgeId, //
-							new CurrentDataNotification(values)));
-
-		} catch (OpenemsException e) {
-			// Log & stop subscribes
-			this.parent.logWarn(this.log, "Unable to send CurrentDataNotification: " + e.getMessage());
-			this.subscribedChannels.dispose();
-		}
+		this.send(//
+				new EdgeRpcNotification(edgeId, //
+						new CurrentDataNotification(values)));
 	}
 
 	/**
@@ -222,6 +239,16 @@ public class WsData extends io.openems.common.websocket.WsData {
 	 */
 	public boolean isEdgeSubscribed(String edgeId) {
 		return this.subscribedEdges.contains(edgeId);
+	}
+
+	public UUID getId() {
+		return this.id;
+	}
+
+	@Override
+	public void dispose() {
+		super.dispose();
+		this.subscribedChannels.dispose();
 	}
 
 }

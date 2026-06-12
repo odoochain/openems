@@ -1,32 +1,51 @@
-import { Component, OnInit } from '@angular/core';
-import { ActivatedRoute } from '@angular/router';
-import { environment } from 'src/environments';
-import { Edge, Service, Utils } from '../../shared/shared';
-import { canSeeAppCenter } from './app/permissions';
+import { Component, OnInit } from "@angular/core";
+import { RouterModule } from "@angular/router";
+import { TranslateService } from "@ngx-translate/core";
+import { CommonUiModule } from "src/app/shared/common-ui.module";
+import { FlatWidgetButtonComponent } from "src/app/shared/components/flat/flat-widget-button/flat-widget-button";
+import { Role } from "src/app/shared/type/role";
+import { environment } from "src/environments";
+import { Edge, Service, Utils } from "../../shared/shared";
+import { JsonrpcTestPermission } from "./jsonrpctest/jsonrpctest.permission";
 
 @Component({
-  selector: 'settings',
-  templateUrl: './settings.component.html'
+    selector: "settings",
+    templateUrl: "./settings.component.html",
+    standalone: true,
+    imports: [
+        CommonUiModule,
+        RouterModule,
+        FlatWidgetButtonComponent,
+    ],
 })
 export class SettingsComponent implements OnInit {
 
-  public edge: Edge = null;
-  public environment = environment;
+    public edge: Edge | null = null;
+    public environment = environment;
 
-  public canSeeAppCenter: boolean | undefined;
-  protected isEdgeBackend: boolean = environment.backend === 'OpenEMS Edge';
+    public isAtLeastOwner: boolean = false;
+    public isAtLeastInstaller: boolean = false;
+    public isAtLeastAdmin: boolean = false;
+    public canSeeJsonrpcTest: boolean = false;
 
-  constructor(
-    private route: ActivatedRoute,
-    protected utils: Utils,
-    private service: Service
-  ) {
-  }
+    protected isEdgeBackend: boolean = environment.backend === "OpenEMS Edge";
 
-  public ngOnInit() {
-    this.service.setCurrentComponent({ languageKey: 'Menu.edgeSettings' }, this.route).then(edge => {
-      this.edge = edge;
-      this.canSeeAppCenter = canSeeAppCenter(this.edge);
-    });
-  }
+    constructor(
+        protected utils: Utils,
+        private service: Service,
+        private translate: TranslateService,
+    ) {
+    }
+
+    public ngOnInit() {
+        this.service.getCurrentEdge().then(edge => {
+            this.edge = edge;
+            const user = this.service.metadata?.value?.user;
+            this.isAtLeastOwner = edge.roleIsAtLeast(Role.OWNER);
+            this.isAtLeastInstaller = edge.roleIsAtLeast(Role.INSTALLER);
+            this.isAtLeastAdmin = edge.roleIsAtLeast(Role.ADMIN);
+            this.canSeeJsonrpcTest = JsonrpcTestPermission.canSee(user, edge);
+        });
+    }
+
 }

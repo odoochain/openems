@@ -1,128 +1,149 @@
-import { NgModule } from '@angular/core';
-import { PreloadAllModules, RouterModule, Routes } from '@angular/router';
-import { environment } from 'src/environments';
+import { inject, NgModule } from "@angular/core";
+import { NoPreloading, RedirectFunction, RouterModule, Routes } from "@angular/router";
+import { CookieService } from "ngx-cookie-service";
+import { environment } from "src/environments";
+import { EdgeComponent } from "./edge/edge.component";
+import { ControllerEnerixOverviewComponent as EnerixOverviewComponent } from "./edge/history/Controller/EnerixControl/overview/overview";
+import { DetailsOverviewComponent as DigitalOutputDetailsOverviewComponent } from "./edge/history/Controller/Io/DigitalOutput/details/details.overview";
+import { ControllerIoDigitalOutputOverviewComponent } from "./edge/history/Controller/Io/DigitalOutput/overview/overview";
+import { ControllerModbusTcpApiOverviewComponent as ModbusTcpApiOverviewComponent } from "./edge/history/Controller/ModbusTcpApi/overview/overview";
+import { ControllerPeakShavingAsymmetricOverviewComponent as AsymmetricPeakshavingChartOverviewComponent } from "./edge/history/Controller/peak-shaving/asymmetric/overview/overview";
+import { ControllerPeakShavingSymmetricOverviewComponent as SymmetricPeakshavingChartOverviewComponent } from "./edge/history/Controller/peak-shaving/symmetric/overview/overview";
+import { ControllerPeakShavingTimeslotOverviewComponent as TimeslotPeakshavingChartOverviewComponent } from "./edge/history/Controller/peak-shaving/timeslot/overview/overview";
+import { DelayedSellToGridChartOverviewComponent } from "./edge/history/delayedselltogrid/symmetricpeakshavingchartoverview/delayedselltogridchartoverview.component";
+import { HistoryComponent as EdgeHistoryComponent } from "./edge/history/history.component";
+import { HistoryDataService } from "./edge/history/historydataservice";
+import { HistoryParentComponent } from "./edge/history/historyparent.component";
+import { CommonAutarchyOverviewComponent as CommonAutarchyHistoryOverviewComponent } from "./edge/live/common/autarchy/history/overview/overview";
+import { CommonConsumptionHistoryOverviewComponent } from "./edge/live/common/consumption/history/overview/overview";
+import { CommonConsumptionDetailsOverviewComponent } from "./edge/live/common/consumption/history/phase-accurate/overview/overview";
+import { CommonGridDetailsExternalLimitationOverviewComponent } from "./edge/live/common/grid/history/details/external-limitation/overview/details.overview";
+import { CommonGridDetailsPhaseAccurateOverviewComponent } from "./edge/live/common/grid/history/details/phase-accurate/overview/details.overview";
+import { CommonGridOverviewComponent } from "./edge/live/common/grid/history/overview/overview";
+import { CommonProductionHistoryOverviewComponent } from "./edge/live/common/production/history/overview/overview";
+import { CommonProductionDetailsOverviewComponent } from "./edge/live/common/production/history/phase-accurate/overview/overview";
+import { CommonSelfconsumptionOverviewComponent as SelfconsumptionChartOverviewComponent } from "./edge/live/common/selfconsumption/history/overview/overview";
+import { ControllerChannelThresholdOverviewComponent as ChannelthresholdChartOverviewComponent } from "./edge/live/Controller/Channelthreshold/history/overview/overview";
+import { ControllerEssGridOptimizedChargeOverviewComponent } from "./edge/live/Controller/Ess/GridOptimizedCharge/history/overview/overview";
+import { ControllerEssTimeOfUseTariffOverviewComponent } from "./edge/live/Controller/Ess/TimeOfUseTariff/history/overview/overview";
+import { ControllerHeatOverviewComponent } from "./edge/live/Controller/Heat/history/overview/overview";
+import { ControllerIoHeatingElementOverviewComponent } from "./edge/live/Controller/Io/HeatingElement/history/overview/overview";
+import { LiveDataService } from "./edge/live/livedataservice";
+import { LoginComponent } from "./index/login.component";
+import { OverViewComponent } from "./index/overview/overview.component";
+import { CurrentAndVoltageOverviewComponent } from "./shared/components/edge/meter/currentVoltage/overview/currentVoltage.overview";
+import { DataService } from "./shared/components/shared/dataservice";
+import { suffixMatcher } from "./shared/guards/url-matcher";
+import { OAuthCallBackComponent } from "./shared/service/auth/oauthcallback.component";
+import { UserComponent } from "./user/user.component";
 
-import { ChangelogViewComponent } from './changelog/view/view';
-import { EdgeComponent } from './edge/edge.component';
-import { ChannelthresholdChartOverviewComponent } from './edge/history/channelthreshold/channelthresholdchartoverview/channelthresholdchartoverview.component';
-import { OverviewComponent as AutarchyChartOverviewComponent } from './edge/history/common/autarchy/overview/overview';
-import { OverviewComponent as ProductionChartOverviewComponent } from './edge/history/common/production/overview/overview';
-import { OverviewComponent as SelfconsumptionChartOverviewComponent } from './edge/history/common/selfconsumption/overview/overview';
-import { ConsumptionChartOverviewComponent } from './edge/history/consumption/consumptionchartoverview/consumptionchartoverview.component';
-import { DelayedSellToGridChartOverviewComponent } from './edge/history/delayedselltogrid/symmetricpeakshavingchartoverview/delayedselltogridchartoverview.component';
-import { FixDigitalOutputChartOverviewComponent } from './edge/history/fixdigitaloutput/fixdigitaloutputchartoverview/fixdigitaloutputchartoverview.component';
-import { GridChartOverviewComponent } from './edge/history/grid/gridchartoverview/gridchartoverview.component';
-import { GridOptimizedChargeChartOverviewComponent } from './edge/history/gridoptimizedcharge/gridoptimizedchargechartoverview/gridoptimizedchargechartoverview.component';
-import { HeatingelementChartOverviewComponent } from './edge/history/heatingelement/heatingelementchartoverview/heatingelementchartoverview.component';
-import { HeatPumpChartOverviewComponent } from './edge/history/heatpump/heatpumpchartoverview/heatpumpchartoverview.component';
-import { HistoryComponent as EdgeHistoryComponent } from './edge/history/history.component';
-import { HistoryDataService } from './edge/history/historydataservice';
-import { HistoryParentComponent } from './edge/history/historyparent.component';
-import { AsymmetricPeakshavingChartOverviewComponent } from './edge/history/peakshaving/asymmetric/asymmetricpeakshavingchartoverview/asymmetricpeakshavingchartoverview.component';
-import { SymmetricPeakshavingChartOverviewComponent } from './edge/history/peakshaving/symmetric/symmetricpeakshavingchartoverview/symmetricpeakshavingchartoverview.component';
-import { TimeslotPeakshavingChartOverviewComponent } from './edge/history/peakshaving/timeslot/timeslotpeakshavingchartoverview/timeslotpeakshavingchartoverview.component';
-import { SinglethresholdChartOverviewComponent } from './edge/history/singlethreshold/singlethresholdchartoverview/singlethresholdchartoverview.component';
-import { StorageChartOverviewComponent } from './edge/history/storage/storagechartoverview/storagechartoverview.component';
-import { TimeOfUseTariffDischargeChartOverviewComponent } from './edge/history/timeofusetariffdischarge/timeofusetariffdischargeoverview/timeofusetariffdischargechartoverview.component';
-import { LiveComponent as EdgeLiveComponent } from './edge/live/live.component';
-import { LiveDataService } from './edge/live/livedataservice';
-import { AlertingComponent as EdgeSettingsAlerting } from './edge/settings/alerting/alerting.component';
-import { IndexComponent as EdgeSettingsAppIndex } from './edge/settings/app/index.component';
-import { InstallAppComponent as EdgeSettingsAppInstall } from './edge/settings/app/install.component';
-import { SingleAppComponent as EdgeSettingsAppSingle } from './edge/settings/app/single.component';
-import { UpdateAppComponent as EdgeSettingsAppUpdate } from './edge/settings/app/update.component';
-import { ChannelsComponent as EdgeSettingsChannelsComponent } from './edge/settings/channels/channels.component';
-import { IndexComponent as EdgeSettingsComponentInstallIndexComponentComponent } from './edge/settings/component/install/index.component';
-import { ComponentInstallComponent as EdgeSettingsComponentInstallComponentComponent } from './edge/settings/component/install/install.component';
-import { IndexComponent as EdgeSettingsComponentUpdateIndexComponentComponent } from './edge/settings/component/update/index.component';
-import { ComponentUpdateComponent as EdgeSettingsComponentUpdateComponentComponent } from './edge/settings/component/update/update.component';
-import { NetworkComponent as EdgeSettingsNetworkComponent } from './edge/settings/network/network.component';
-import { AliasUpdateComponent } from './edge/settings/profile/aliasupdate.component';
-import { ProfileComponent as EdgeSettingsProfileComponent } from './edge/settings/profile/profile.component';
-import { SettingsComponent as EdgeSettingsComponent } from './edge/settings/settings.component';
-import { SystemExecuteComponent as EdgeSettingsSystemExecuteComponent } from './edge/settings/systemexecute/systemexecute.component';
-import { SystemLogComponent as EdgeSettingsSystemLogComponent } from './edge/settings/systemlog/systemlog.component';
-import { SystemUpdateComponent as EdgeSettingsSystemUpdateComponent } from './edge/settings/systemupdate/systemupdate.component';
-import { IndexComponent } from './index/index.component';
-import { DataService } from './shared/genericComponents/shared/dataservice';
-import { UserComponent } from './user/user.component';
+export const history: (/** Determines if titles in headers can be set */ customHeaders: boolean) => Routes = (customHeaders) => [{
+    path: "history", providers: [{
+        useClass: HistoryDataService,
+        provide: DataService,
+    }],
+    component: HistoryParentComponent, children: [
+        { path: "", component: EdgeHistoryComponent, data: { ...(customHeaders ? { navbarTitleToBeTranslated: "GENERAL.HISTORY" } : {}) } },
+        // History Chart Pages
+        { path: ":componentId/asymmetricpeakshavingchart", component: AsymmetricPeakshavingChartOverviewComponent },
+        { path: ":componentId/delayedselltogridchart", component: DelayedSellToGridChartOverviewComponent },
+        { path: ":componentId/gridOptimizedChargeChart", component: ControllerEssGridOptimizedChargeOverviewComponent },
+        { path: ":componentId/heatingelementchart", component: ControllerIoHeatingElementOverviewComponent },
+        { path: ":componentId/heatmypvchart", component: ControllerHeatOverviewComponent },
+        { path: ":componentId/heatchart", component: ControllerHeatOverviewComponent },
+        { path: ":componentId/enerixchart", component: EnerixOverviewComponent },
+        { path: ":componentId/heatpumpchart", loadChildren: () => import("./edge/live/Controller/Io/Heatpump/history/controller-io-heatpump-history").then(m => m.HeatPumpHistory) },
+        { path: ":componentId/modbusTcpApi", component: ModbusTcpApiOverviewComponent },
+        { path: ":componentId/time-of-use", component: ControllerEssTimeOfUseTariffOverviewComponent },
+        { path: ":componentId/symmetricpeakshavingchart", component: SymmetricPeakshavingChartOverviewComponent },
+        { path: ":componentId/timeslotpeakshavingchart", component: TimeslotPeakshavingChartOverviewComponent },
+        { path: "autarchychart", component: CommonAutarchyHistoryOverviewComponent },
+        { path: "consumptionchart", component: CommonConsumptionHistoryOverviewComponent },
+        { path: "consumptionchart/:componentId", component: CommonConsumptionDetailsOverviewComponent },
+        { path: "consumptionchart/:componentId/currentVoltage", component: CurrentAndVoltageOverviewComponent },
+        { path: "gridchart", component: CommonGridOverviewComponent },
+        { path: "gridchart/externalLimitation", component: CommonGridDetailsExternalLimitationOverviewComponent },
+        { path: "gridchart/:componentId", component: CommonGridDetailsPhaseAccurateOverviewComponent },
+        { path: "gridchart/:componentId/currentVoltage", component: CurrentAndVoltageOverviewComponent },
+        { path: "productionchart", component: CommonProductionHistoryOverviewComponent },
+        { path: "productionchart/:componentId", component: CommonProductionDetailsOverviewComponent },
+        { path: "productionchart/:componentId/currentVoltage", component: CurrentAndVoltageOverviewComponent },
+        { path: "selfconsumptionchart", component: SelfconsumptionChartOverviewComponent },
+        { path: "storagechart", loadComponent: () => import("./edge/live/common/storage/history/overview/overview").then(m => m.CommonStorageOverviewComponent) },
 
-const routes: Routes = [
-  { path: '', redirectTo: 'index', pathMatch: 'full' },
-  { path: 'index', data: { navbarTitle: environment.uiTitle }, component: IndexComponent },
+        // Controllers
+        { path: "channelthresholdchart", component: ChannelthresholdChartOverviewComponent },
+        { path: "digitaloutputchart", component: ControllerIoDigitalOutputOverviewComponent },
+        { path: "digitaloutputchart/:componentId", component: DigitalOutputDetailsOverviewComponent },
+    ],
+}];
 
-  { path: 'user', component: UserComponent },
-  { path: 'changelog', component: ChangelogViewComponent },
+export const routes: Routes = [
 
-  // Edge Pages
-  {
-    path: 'device/:edgeId', component: EdgeComponent, children: [
-      { path: '', redirectTo: 'live', pathMatch: 'full' },
-      {
-        path: 'live', data: { navbarTitle: environment.uiTitle }, providers: [{
-          useClass: LiveDataService,
-          provide: DataService
-        }], component: EdgeLiveComponent
-      },
-      {
-        path: 'history', providers: [{
-          useClass: HistoryDataService,
-          provide: DataService
-        }], component: HistoryParentComponent, children: [
-          { path: '', component: EdgeHistoryComponent },
-          // History Chart Pages
-          { path: ':componentId/asymmetricpeakshavingchart', component: AsymmetricPeakshavingChartOverviewComponent },
-          { path: ':componentId/channelthresholdchart', component: ChannelthresholdChartOverviewComponent },
-          { path: ':componentId/delayedselltogridchart', component: DelayedSellToGridChartOverviewComponent },
-          { path: ':componentId/fixdigitaloutputchart', component: FixDigitalOutputChartOverviewComponent },
-          { path: ':componentId/gridOptimizedChargeChart', component: GridOptimizedChargeChartOverviewComponent },
-          { path: ':componentId/heatingelementchart', component: HeatingelementChartOverviewComponent },
-          { path: ':componentId/heatpumpchart', component: HeatPumpChartOverviewComponent },
-          { path: ':componentId/singlethresholdchart', component: SinglethresholdChartOverviewComponent },
-          { path: ':componentId/symmetricpeakshavingchart', component: SymmetricPeakshavingChartOverviewComponent },
-          { path: ':componentId/timeslotpeakshavingchart', component: TimeslotPeakshavingChartOverviewComponent },
-          { path: ':componentId/timeOfUseTariffDischargeChart', component: TimeOfUseTariffDischargeChartOverviewComponent },
-          { path: 'autarchychart', component: AutarchyChartOverviewComponent },
-          { path: 'consumptionchart', component: ConsumptionChartOverviewComponent },
-          { path: 'gridchart', component: GridChartOverviewComponent },
-          { path: 'productionchart', component: ProductionChartOverviewComponent },
-          { path: 'selfconsumptionchart', component: SelfconsumptionChartOverviewComponent },
-          { path: 'storagechart', component: StorageChartOverviewComponent }
-        ]
-      },
+    // TODO should be removed in the future
+    { path: "", redirectTo: oauthRedirectFunction("login"), pathMatch: "full" },
+    { path: "oauthcallback", component: OAuthCallBackComponent },
+    { path: "login", component: LoginComponent, data: { navbarTitle: environment.uiTitle } },
 
-      { path: 'settings', data: { navbarTitleToBeTranslated: 'Menu.edgeSettings' }, component: EdgeSettingsComponent },
-      { path: 'settings/channels', component: EdgeSettingsChannelsComponent },
-      { path: 'settings/component.install', component: EdgeSettingsComponentInstallIndexComponentComponent },
-      { path: 'settings/component.install/:factoryId', component: EdgeSettingsComponentInstallComponentComponent },
-      { path: 'settings/component.update', component: EdgeSettingsComponentUpdateIndexComponentComponent },
-      { path: 'settings/component.update/:componentId', component: EdgeSettingsComponentUpdateComponentComponent },
-      { path: 'settings/network', component: EdgeSettingsNetworkComponent },
-      { path: 'settings/profile', component: EdgeSettingsProfileComponent },
-      { path: 'settings/profile/:componentId', component: AliasUpdateComponent },
-      { path: 'settings/systemexecute', component: EdgeSettingsSystemExecuteComponent },
-      { path: 'settings/systemlog', component: EdgeSettingsSystemLogComponent },
-      { path: 'settings/systemupdate', component: EdgeSettingsSystemUpdateComponent },
-      { path: 'settings/app', data: { navbarTitle: environment.edgeShortName + ' Apps' }, component: EdgeSettingsAppIndex },
-      { path: 'settings/app/install/:appId', component: EdgeSettingsAppInstall },
-      { path: 'settings/app/update/:appId', component: EdgeSettingsAppUpdate },
-      { path: 'settings/app/single/:appId', component: EdgeSettingsAppSingle },
-      { path: 'settings/alerting', component: EdgeSettingsAlerting }
-    ]
-  },
+    { path: "overview", component: OverViewComponent },
 
+    // Edge Pages
+    {
+        path: "device/:edgeId", component: EdgeComponent, children: [
+            { path: "", redirectTo: "live", pathMatch: "full" },
+            {
+                path: "live", data: { navbarTitle: environment.uiTitle }, providers: [{
+                    useClass: LiveDataService,
+                    provide: DataService,
+                }], loadChildren: () => import("./shared/components/navigation/navigation-routing.module").then(m => m.NavigationRoutingModule),
+            },
+            ...history(false),
+            { path: "settings", loadChildren: () => import("./edge/settings/settings-routing.module").then(m => m.SettingsRoutingModule) },
+        ],
+    },
 
-  { path: 'demo', component: IndexComponent }
+    { path: "demo", component: LoginComponent },
+    { matcher: suffixMatcher("user"), component: UserComponent, data: { navbarTitleToBeTranslated: "MENU.USER" } },
+    { matcher: suffixMatcher("changelog"), loadChildren: () => import("./changelog/changelog.module").then(m => m.ChangelogModule), data: { navbarTitleToBeTranslated: "MENU.CHANGELOG" } },
+    // Fallback
+    { path: "**", pathMatch: "full", redirectTo: "index" },
 ];
 
-export const appRoutingProviders: any[] = [
-
-];
+export const appRoutingProviders: any[] = [];
 
 @NgModule({
-  imports: [
-    RouterModule.forRoot(routes, { preloadingStrategy: PreloadAllModules })
-  ],
-  exports: [RouterModule]
+    imports: [
+        RouterModule.forRoot(routes, { preloadingStrategy: NoPreloading, paramsInheritanceStrategy: "always" }),
+    ],
+    exports: [RouterModule],
 })
 export class AppRoutingModule { }
+
+/**
+ * Creates a RedirectFunction, which checks for a state parameter
+ * in the query parameters and also the active oauth state if both
+ * are present navigates to the active oauth state.
+ *
+ * @param defaultRoute the default route to navigate to if no oauth state is present
+ * @returns the created RedirectFunction
+ */
+function oauthRedirectFunction(defaultRoute: string): RedirectFunction {
+    return redirectData => {
+        const state = redirectData.queryParams["state"] as string | undefined;
+        if (!state) {
+            return defaultRoute;
+        }
+
+        const cookieService = inject(CookieService);
+        const oauthRedirectStateRaw = cookieService.get("oauthredirectstate");
+        if (!oauthRedirectStateRaw) {
+            return defaultRoute;
+        }
+
+        const queryParamsString = Object.entries(redirectData.queryParams)
+            .map(([key, value]) => key + "=" + value).join("&");
+
+        const oauthRedirectState = JSON.parse(oauthRedirectStateRaw) as { href: string };
+        return oauthRedirectState.href + "?" + queryParamsString;
+    };
+}

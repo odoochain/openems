@@ -1,8 +1,9 @@
+import { States } from "../../ngrx-store/states";
 import { JsonrpcRequest } from "../base";
 
 /**
  * Wraps a JSON-RPC Request for a specific Edge-ID.
- * 
+ *
  * <pre>
  * {
  *   "jsonrpc": "2.0",
@@ -18,12 +19,13 @@ import { JsonrpcRequest } from "../base";
 export class EdgeRpcRequest extends JsonrpcRequest {
 
     private static METHOD: string = "edgeRpc";
+    protected override requiredState: States = States.EDGE_SELECTED;
 
     public constructor(
         public override readonly params: {
             edgeId: string,
             payload: JsonrpcRequest
-        }
+        },
     ) {
         super(EdgeRpcRequest.METHOD, params);
     }

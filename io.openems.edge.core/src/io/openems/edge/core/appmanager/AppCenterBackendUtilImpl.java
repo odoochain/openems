@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -12,6 +13,8 @@ import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.osgi.service.component.annotations.ReferencePolicy;
 import org.osgi.service.component.annotations.ReferencePolicyOption;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.exceptions.OpenemsException;
@@ -28,47 +31,65 @@ import io.openems.common.jsonrpc.response.AppCenterGetInstalledAppsResponse.Inst
 import io.openems.common.jsonrpc.response.AppCenterGetPossibleAppsResponse;
 import io.openems.common.jsonrpc.response.AppCenterGetPossibleAppsResponse.Bundle;
 import io.openems.common.jsonrpc.response.AppCenterIsKeyApplicableResponse;
+import io.openems.common.session.AbstractUser;
+import io.openems.edge.common.component.ComponentManager;
 import io.openems.edge.common.user.User;
-import io.openems.edge.controller.api.backend.ControllerApiBackend;
+import io.openems.edge.controller.api.backend.api.ControllerApiBackend;
 
 @Component
 public class AppCenterBackendUtilImpl implements AppCenterBackendUtil {
 
-	@Reference(policy = ReferencePolicy.DYNAMIC, policyOption = ReferencePolicyOption.GREEDY, cardinality = ReferenceCardinality.OPTIONAL)
+	public record Timeout(long amount, TimeUnit unit) {
+
+	}
+
+	private final Logger log = LoggerFactory.getLogger(this.getClass());
+	private static final Timeout DEFAULT_TIMEOUT = new Timeout(30, TimeUnit.SECONDS);
+
+	@Reference(//
+			policy = ReferencePolicy.DYNAMIC, //
+			policyOption = ReferencePolicyOption.GREEDY, //
+			cardinality = ReferenceCardinality.OPTIONAL, //
+			target = "(enabled=true)" //
+	)
 	private volatile ControllerApiBackend backend;
 
+	private final ComponentManager componentManager;
+
 	@Activate
-	public AppCenterBackendUtilImpl() {
+	public AppCenterBackendUtilImpl(//
+			@Reference ComponentManager componentManager //
+	) {
+		this.componentManager = componentManager;
 	}
 
 	@Override
-	public boolean isKeyApplicable(User user, String key, String appId) {
-		try {
-			var response = this.handleRequest(user, new AppCenterIsKeyApplicableRequest(key, appId));
-			return AppCenterIsKeyApplicableResponse.from(response).isKeyApplicable;
-		} catch (OpenemsNamedException e) {
-			return false;
-		}
+	public boolean isKeyApplicable(User user, String key, String appId) throws OpenemsNamedException {
+		var response = this.handleRequest(user, new AppCenterIsKeyApplicableRequest(key, appId), DEFAULT_TIMEOUT);
+		return AppCenterIsKeyApplicableResponse.from(response).isKeyApplicable;
 	}
 
 	@Override
 	public void addInstallAppInstanceHistory(User user, String key, String appId, UUID instanceId)
 			throws OpenemsNamedException {
 		this.handleRequest(user, new AppCenterAddInstallInstanceHistoryRequest(key, //
-				appId, instanceId, Optional.ofNullable(user).map(u -> u.getId()).orElse(null)));
+				appId, instanceId, Optional.ofNullable(user).map(AbstractUser::getId).orElse(null)),
+				new Timeout(120, TimeUnit.SECONDS));
 	}
 
 	@Override
 	public CompletableFuture<? extends JsonrpcResponseSuccess> addDeinstallAppInstanceHistory(User user, String appId,
 			UUID instanceId) throws OpenemsNamedException {
 		return this.handleRequestAsync(user, new AppCenterAddDeinstallInstanceHistoryRequest(appId, //
-				instanceId, Optional.ofNullable(user).map(u -> u.getId()).orElse(null)));
+				instanceId, Optional.ofNullable(user).map(AbstractUser::getId).orElse(null)),
+				new Timeout(5, TimeUnit.MINUTES));
 	}
 
 	@Override
 	public List<Bundle> getPossibleApps(String key) {
 		try {
-			var response = this.handleRequest(null, new AppCenterGetPossibleAppsRequest(key));
+			var response = this.handleRequest(null, new AppCenterGetPossibleAppsRequest(key),
+					new Timeout(5, TimeUnit.MINUTES));
 			return AppCenterGetPossibleAppsResponse.from(response).possibleApps;
 		} catch (OpenemsNamedException e) {
 			e.printStackTrace();
@@ -78,37 +99,54 @@ public class AppCenterBackendUtilImpl implements AppCenterBackendUtil {
 
 	@Override
 	public List<Instance> getInstalledApps() throws OpenemsNamedException {
-		var response = this.handleRequest(null, new AppCenterGetInstalledAppsRequest());
+		var response = this.handleRequest(null, new AppCenterGetInstalledAppsRequest(),
+				new Timeout(5, TimeUnit.MINUTES));
 		return AppCenterGetInstalledAppsResponse.from(response).installedApps;
 	}
 
 	@Override
 	public boolean isConnected() {
-		if (this.backend == null) {
+		final var backendApi = this.getBackend();
+		if (backendApi == null) {
 			return false;
 		}
-		return this.backend.isConnected();
+		return backendApi.isConnected();
 	}
 
 	private final CompletableFuture<? extends JsonrpcResponseSuccess> handleRequestAsync(User user,
-			JsonrpcRequest request) throws OpenemsNamedException {
-		return this.getBackend().handleJsonrpcRequest(user, new AppCenterRequest(request));
+			JsonrpcRequest request, Timeout timeout) throws OpenemsNamedException {
+		return this.getBackendOrError().sendRequest(user, new AppCenterRequest(request)) //
+				.orTimeout(timeout.amount(), timeout.unit());
 	}
 
-	private final JsonrpcResponseSuccess handleRequest(User user, JsonrpcRequest request) throws OpenemsNamedException {
+	private final JsonrpcResponseSuccess handleRequest(User user, JsonrpcRequest request, Timeout timeout)
+			throws OpenemsNamedException {
 		try {
-			return this.handleRequestAsync(user, request).get();
+			return this.handleRequestAsync(user, request, timeout).get();
 		} catch (InterruptedException | ExecutionException e) {
 			e.printStackTrace();
 			throw getOpenemsException(e);
 		}
 	}
 
-	private final ControllerApiBackend getBackend() throws OpenemsNamedException {
-		if (!this.isConnected()) {
+	private final ControllerApiBackend getBackendOrError() throws OpenemsNamedException {
+		final var backendApi = this.getBackend();
+		if (backendApi == null || !backendApi.isConnected()) {
 			throw new OpenemsException("Backend not connected!");
 		}
-		return this.backend;
+		return backendApi;
+	}
+
+	private final ControllerApiBackend getBackend() {
+		if (this.backend != null) {
+			return this.backend;
+		}
+		final var backendApis = this.componentManager.getEnabledComponentsOfType(ControllerApiBackend.class);
+		if (backendApis.isEmpty()) {
+			return null;
+		}
+		this.log.warn("BackendApi Controller exists but was not injected!");
+		return backendApis.get(0);
 	}
 
 	private static final OpenemsNamedException getOpenemsException(Throwable e) {
@@ -116,8 +154,8 @@ public class AppCenterBackendUtilImpl implements AppCenterBackendUtil {
 	}
 
 	private static final OpenemsNamedException getOpenemsException(Throwable e, boolean isRootException) {
-		if (e instanceof OpenemsNamedException) {
-			return (OpenemsNamedException) e;
+		if (e instanceof OpenemsNamedException one) {
+			return one;
 		}
 
 		if (e.getCause() != null) {

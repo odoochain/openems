@@ -1,58 +1,48 @@
 package io.openems.edge.battery.fenecon.home;
 
+import java.util.function.IntSupplier;
+
+import io.openems.edge.battery.fenecon.home.statemachine.StateMachine;
 import io.openems.edge.battery.protection.BatteryProtectionDefinition;
-import io.openems.edge.battery.protection.force.ForceCharge;
-import io.openems.edge.battery.protection.force.ForceDischarge;
-import io.openems.edge.common.linecharacteristic.PolyLine;
 
-public class FeneconHomeBatteryProtection implements BatteryProtectionDefinition {
+public abstract class FeneconHomeBatteryProtection implements BatteryProtectionDefinition {
 
-	@Override
-	public int getInitialBmsMaxEverChargeCurrent() {
-		return 40; // [A]
+	private final IntSupplier forceChargeDischargeCurrent;
+	private final StateMachine stateMachine;
+
+	public FeneconHomeBatteryProtection(IntSupplier forceChargeDischargeCurrent, StateMachine stateMachine) {
+		this.forceChargeDischargeCurrent = forceChargeDischargeCurrent;
+		this.stateMachine = stateMachine;
+	}
+
+	/**
+	 * Creates a {@link BatteryProtectionDefinition} for the given type.
+	 * 
+	 * @param type                 the {@link BatteryFeneconHomeHardwareType}
+	 * @param forceCurrentSupplier supplier for forced charge/discharge current
+	 * @param stateMachine         Battery state machine
+	 * @return a {@link BatteryProtectionDefinition}
+	 */
+	public static BatteryProtectionDefinition createProtection(BatteryFeneconHomeHardwareType type,
+			IntSupplier forceCurrentSupplier, StateMachine stateMachine) {
+		return switch (type) {
+		case BATTERY_52 -> new FeneconHomeBatteryProtection52(forceCurrentSupplier, stateMachine);
+		case BATTERY_64 -> new FeneconHomeBatteryProtection64(forceCurrentSupplier, stateMachine);
+		};
 	}
 
 	@Override
-	public int getInitialBmsMaxEverDischargeCurrent() {
-		return 40; // [A]
+	public IntSupplier getForceChargeDischargeCurrent() {
+		return this.forceChargeDischargeCurrent;
 	}
 
 	@Override
-	public PolyLine getChargeVoltageToPercent() {
-		return PolyLine.empty();
+	public boolean isChargeAllowed() {
+		return this.stateMachine.isChargeAllowed();
 	}
 
 	@Override
-	public PolyLine getDischargeVoltageToPercent() {
-		return PolyLine.create() //
-				.addPoint(3000, 0.1) //
-				.addPoint(3100, 1) //
-				.build();
+	public boolean isDischargeAllowed() {
+		return this.stateMachine.isDischargeAllowed();
 	}
-
-	@Override
-	public PolyLine getChargeTemperatureToPercent() {
-		return PolyLine.empty();
-	}
-
-	@Override
-	public PolyLine getDischargeTemperatureToPercent() {
-		return PolyLine.empty();
-	}
-
-	@Override
-	public ForceDischarge.Params getForceDischargeParams() {
-		return new ForceDischarge.Params(3550, 3490, 3450);
-	}
-
-	@Override
-	public ForceCharge.Params getForceChargeParams() {
-		return new ForceCharge.Params(2900, 3000, 3100);
-	}
-
-	@Override
-	public Double getMaxIncreaseAmperePerSecond() {
-		return 0.1; // [A] per second
-	}
-
 }

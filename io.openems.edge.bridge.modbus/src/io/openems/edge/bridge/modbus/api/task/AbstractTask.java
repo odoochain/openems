@@ -1,8 +1,11 @@
 package io.openems.edge.bridge.modbus.api.task;
 
+import static io.openems.common.utils.FunctionUtils.doNothing;
+
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +33,7 @@ public abstract non-sealed class AbstractTask<//
 		RESPONSE extends ModbusResponse> implements Task {
 
 	protected final String name;
+	protected final Consumer<ExecuteState> onExecute;
 	protected final Class<RESPONSE> responseClazz;
 	protected final int startAddress;
 	protected final int length;
@@ -39,8 +43,10 @@ public abstract non-sealed class AbstractTask<//
 
 	private AbstractOpenemsModbusComponent parent = null; // this is always set by ModbusProtocol.addTask()
 
-	public AbstractTask(String name, Class<RESPONSE> responseClazz, int startAddress, ModbusElement... elements) {
+	public AbstractTask(String name, Consumer<ExecuteState> onExecute, Class<RESPONSE> responseClazz, int startAddress,
+			ModbusElement... elements) {
 		this.name = name;
+		this.onExecute = onExecute;
 		this.responseClazz = responseClazz;
 		this.startAddress = startAddress;
 		this.elements = elements;
@@ -87,7 +93,7 @@ public abstract non-sealed class AbstractTask<//
 	 * WriteTask.
 	 *
 	 * @param bridge the Modbus-Bridge
-	 * @return the number of executed Sub-Tasks
+	 * @return the {@link ExecuteState}
 	 */
 	public abstract ExecuteState execute(AbstractModbusBridge bridge);
 
@@ -105,7 +111,7 @@ public abstract non-sealed class AbstractTask<//
 	 * 
 	 * @param bridge  the {@link AbstractModbusBridge}
 	 * @param request the typed {@link ModbusRequest}
-	 * @return the typed {@link ModbusResponse}
+	 * @return the typed {@link ModbusResponse}, null if Bridge is stopped
 	 * @throws OpenemsException on error
 	 */
 	protected RESPONSE executeRequest(AbstractModbusBridge bridge, REQUEST request) throws Exception {
@@ -113,20 +119,25 @@ public abstract non-sealed class AbstractTask<//
 		var logVerbosity = this.getLogVerbosity(bridge);
 		try {
 			// First try
-			return this.logRequest(bridge, logVerbosity, request,
+			return this.logRequest(TryExecute.FIRST_TRY, bridge, logVerbosity, request,
 					() -> sendRequest(bridge, unitId, this.responseClazz, request));
 
 		} catch (Exception e) {
 			// Second try; with new connection
 			bridge.closeModbusConnection();
-			return this.logRequest(bridge, logVerbosity, request,
+			return this.logRequest(TryExecute.SECOND_TRY, bridge, logVerbosity, request,
 					() -> sendRequest(bridge, unitId, this.responseClazz, request));
 		}
+	}
+
+	private static enum TryExecute {
+		FIRST_TRY, SECOND_TRY
 	}
 
 	/**
 	 * Logs the execution of a {@link ModbusRequest}.
 	 * 
+	 * @param tryExecute   marker for execute first/second try
 	 * @param bridge       the {@link BridgeModbus}
 	 * @param logVerbosity the {@link LogVerbosity}
 	 * @param request      the {@link ModbusRequest}
@@ -135,17 +146,24 @@ public abstract non-sealed class AbstractTask<//
 	 * @return typed {@link ModbusResponse}
 	 * @throws Exception on error
 	 */
-	protected RESPONSE logRequest(BridgeModbus bridge, LogVerbosity logVerbosity, REQUEST request,
-			ThrowingSupplier<RESPONSE, Exception> supplier) throws Exception {
+	protected RESPONSE logRequest(TryExecute tryExecute, BridgeModbus bridge, LogVerbosity logVerbosity,
+			REQUEST request, ThrowingSupplier<RESPONSE, Exception> supplier) throws Exception {
 		return switch (logVerbosity) {
 		case NONE, DEBUG_LOG -> {
-			try {
-				yield supplier.get();
-
-			} catch (Exception e) {
-				this.logError(e, "Execute failed", this.toLogMessage(logVerbosity, request, e));
-				throw e;
+			yield switch (tryExecute) {
+			case FIRST_TRY ->
+				// On first try: do not log error in low LogVerbosity
+				supplier.get();
+			case SECOND_TRY -> {
+				// On second try: always log error
+				try {
+					yield supplier.get();
+				} catch (Exception e) {
+					this.logError(e, "Execute failed", this.toLogMessage(logVerbosity, request, e));
+					throw e;
+				}
 			}
+			};
 		}
 
 		case READS_AND_WRITES, READS_AND_WRITES_VERBOSE -> {
@@ -293,8 +311,8 @@ public abstract non-sealed class AbstractTask<//
 				.append(";ref=").append(startAddress).append("/0x").append(Integer.toHexString(startAddress)) //
 				.append(";length=").append(length); //
 		switch (logVerbosity) {
-		case NONE, DEBUG_LOG, READS_AND_WRITES, READS_AND_WRITES_DURATION, READS_AND_WRITES_DURATION_TRACE_EVENTS -> {
-		}
+		case NONE, DEBUG_LOG, READS_AND_WRITES, READS_AND_WRITES_DURATION, READS_AND_WRITES_DURATION_TRACE_EVENTS //
+			-> doNothing();
 		case READS_AND_WRITES_VERBOSE -> {
 			if (request != null) {
 				var hexString = this.payloadToString(request);
@@ -343,13 +361,16 @@ public abstract non-sealed class AbstractTask<//
 	 * @param unitId     the Modbus Unit-ID
 	 * @param clazz      the class of the response
 	 * @param request    the {@link ModbusRequest}
-	 * @return the {@link ModbusResponse}
+	 * @return the {@link ModbusResponse}; null if Bridge is stopped
 	 * @throws Exception on error
 	 */
 	private static <RESPONSE extends ModbusResponse> RESPONSE sendRequest(AbstractModbusBridge bridge, int unitId,
 			Class<RESPONSE> clazz, ModbusRequest request) throws Exception {
 		request.setUnitID(unitId);
 		var transaction = bridge.getNewModbusTransaction();
+		if (transaction == null) {
+			return null;
+		}
 		transaction.setRequest(request);
 		transaction.execute();
 

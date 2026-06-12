@@ -3,27 +3,26 @@ package io.openems.backend.alerting.message;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
-
 import io.openems.backend.alerting.Message;
-import io.openems.backend.common.metadata.AlertingSetting;
-import io.openems.common.utils.JsonUtils;
+import io.openems.backend.common.alerting.OfflineEdgeAlertingSetting;
+import io.openems.backend.common.mail.MailContext;
 
 public class OfflineEdgeMessage extends Message {
 
-	public static final String TEMPLATE = "alerting_email";
+	public static final String TEMPLATE = "alerting_offline";
 
 	private final ZonedDateTime offlineAt;
-	private final TreeMap<Integer, List<AlertingSetting>> recipients;
+	private final TreeMap<Integer, List<OfflineEdgeAlertingSetting>> recipients;
 
-	private OfflineEdgeMessage(String edgeId, ZonedDateTime offlineAt, TreeMap<Integer, List<AlertingSetting>> map) {
+	private OfflineEdgeMessage(String edgeId, ZonedDateTime offlineAt,
+			TreeMap<Integer, List<OfflineEdgeAlertingSetting>> recipients) {
 		super(edgeId);
 		this.offlineAt = offlineAt;
-		this.recipients = map;
+		this.recipients = recipients;
 	}
 
 	public OfflineEdgeMessage(String edgeId, ZonedDateTime offlineAt) {
@@ -32,7 +31,7 @@ public class OfflineEdgeMessage extends Message {
 
 	@Override
 	public ZonedDateTime getNotifyStamp() {
-		var minutes = this.recipients.isEmpty() ? 0 : this.recipients.firstKey();
+		final var minutes = this.recipients.isEmpty() ? 0 : this.recipients.firstKey();
 		return this.offlineAt.plusMinutes(minutes);
 	}
 
@@ -41,13 +40,13 @@ public class OfflineEdgeMessage extends Message {
 	 *
 	 * @param setting of user to whom to send the mail to
 	 */
-	public void addRecipient(AlertingSetting setting) {
-		this.recipients.putIfAbsent(setting.getDelayTime(), new ArrayList<>());
-		var settings = this.recipients.get(setting.getDelayTime());
+	public void addRecipient(OfflineEdgeAlertingSetting setting) {
+		this.recipients.putIfAbsent(setting.delay(), new ArrayList<>());
+		final var settings = this.recipients.get(setting.delay());
 		settings.add(setting);
 	}
 
-	public List<AlertingSetting> getCurrentRecipients() {
+	public List<OfflineEdgeAlertingSetting> getCurrentRecipients() {
 		return this.recipients.get(this.recipients.firstKey());
 	}
 
@@ -74,17 +73,38 @@ public class OfflineEdgeMessage extends Message {
 	}
 
 	@Override
-	public JsonObject getParams() {
-		return JsonUtils.buildJsonObject() //
-				.add("recipients", JsonUtils.generateJsonArray(//
-						this.getCurrentRecipients(), s -> new JsonPrimitive(s.getId())))//
-				.addProperty("edgeId", this.getEdgeId()) //
-				.build();
+	public MailContext getContext() {
+		return new OfflineEdgeMailContext(this);
 	}
 
 	@Override
 	public String toString() {
-		var rec = this.getCurrentRecipients().stream().map(AlertingSetting::getUserId).collect(Collectors.joining(","));
-		return "OfflineEdgeMessage{for=" + this.getEdgeId() + ", to=[" + rec + "], at=" + this.getNotifyStamp() + "}";
+		final var rec = this.getCurrentRecipients().stream() //
+				.map(OfflineEdgeAlertingSetting::userLogin) //
+				.collect(Collectors.joining(","));
+
+		return OfflineEdgeMessage.class.getSimpleName() + "{for=" + this.getEdgeId() + ", to=[" + rec + "], at="
+				+ this.getNotifyStamp() + "}";
+	}
+
+	@Override
+	public boolean equals(Object obj) {
+		return obj instanceof OfflineEdgeMessage other //
+				&& this.getEdgeId().equals(other.getEdgeId()) //
+				&& this.offlineAt.equals(other.offlineAt) //
+				&& this.recipients.equals(other.recipients);
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(this.getEdgeId(), this.offlineAt, this.recipients);
+	}
+
+	private static class OfflineEdgeMailContext extends MailContext {
+		public OfflineEdgeMailContext(OfflineEdgeMessage msg) {
+			super(msg.getEdgeId(), msg.getCurrentRecipients().stream() //
+					.map(OfflineEdgeAlertingSetting::userLogin) //
+					.toList());
+		}
 	}
 }

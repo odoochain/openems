@@ -1,11 +1,13 @@
-import { EdgeConfig, Utils } from 'src/app/shared/shared';
-import { Component } from '@angular/core';
-import { AbstractFlatWidget } from 'src/app/shared/genericComponents/flat/abstract-flat-widget';
-import { ModalComponent } from '../modal/modal';
+import { Component } from "@angular/core";
+import { AbstractFlatWidget } from "src/app/shared/components/flat/abstract-flat-widget";
+import { Modal } from "src/app/shared/components/flat/flat";
+import { EdgeConfig, Utils } from "src/app/shared/shared";
+import { ModalComponent } from "../modal/modal";
 
 @Component({
-    selector: 'Common_Production',
-    templateUrl: './flat.html'
+    selector: "oe-common-production",
+    templateUrl: "./flat.html",
+    standalone: false,
 })
 export class FlatComponent extends AbstractFlatWidget {
 
@@ -13,7 +15,19 @@ export class FlatComponent extends AbstractFlatWidget {
     public chargerComponents: EdgeConfig.Component[] = [];
     public readonly CONVERT_WATT_TO_KILOWATT = Utils.CONVERT_WATT_TO_KILOWATT;
 
+    protected modalComponent: Modal | null = null;
+
+    protected override afterIsInitialized(): void {
+        this.modalComponent = this.getModalComponent();
+    }
+    protected getModalComponent(): Modal {
+        return { component: ModalComponent };
+    };
+
     protected override getChannelAddresses() {
+        if (this.config == null) {
+            return [];
+        }
         // Get Chargers
         this.chargerComponents =
             this.config.getComponentsImplementingNature("io.openems.edge.ess.dccharger.api.EssDcCharger")
@@ -22,15 +36,9 @@ export class FlatComponent extends AbstractFlatWidget {
         // Get productionMeters
         this.productionMeterComponents =
             this.config.getComponentsImplementingNature("io.openems.edge.meter.api.ElectricityMeter")
-                .filter(component => component.isEnabled && this.config.isProducer(component));
+                .filter(component => component.isEnabled && this.config?.isProducer(component));
 
         return [];
     }
 
-    async presentModal() {
-        const modal = await this.modalController.create({
-            component: ModalComponent
-        });
-        return await modal.present();
-    }
 }

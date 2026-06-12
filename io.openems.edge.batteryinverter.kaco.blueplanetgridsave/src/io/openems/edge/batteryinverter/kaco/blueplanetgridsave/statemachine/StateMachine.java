@@ -15,7 +15,9 @@ public class StateMachine extends AbstractStateMachine<StateMachine.State, Conte
 		GO_STOPPED(20), //
 		STOPPED(21), //
 
-		ERROR(30) //
+		ERROR(30), //
+
+		RESTART(40) //
 		;
 
 		private final int value;
@@ -51,20 +53,14 @@ public class StateMachine extends AbstractStateMachine<StateMachine.State, Conte
 
 	@Override
 	public StateHandler<State, Context> getStateHandler(State state) {
-		switch (state) {
-		case UNDEFINED:
-			return new UndefinedHandler();
-		case GO_RUNNING:
-			return new GoRunningHandler();
-		case RUNNING:
-			return new RunningHandler();
-		case GO_STOPPED:
-			return new GoStoppedHandler();
-		case STOPPED:
-			return new StoppedHandler();
-		case ERROR:
-			return new ErrorHandler();
-		}
-		throw new IllegalArgumentException("Unknown State [" + state + "]");
+		return switch (state) {
+		case UNDEFINED -> new UndefinedHandler();
+		case GO_RUNNING -> new GoRunningHandler();
+		case RUNNING -> new RunningHandler();
+		case GO_STOPPED -> new GoStoppedHandler();
+		case STOPPED -> new StoppedHandler();
+		case ERROR -> new ErrorHandler();
+		case RESTART -> new RestartHandler();
+		};
 	}
 }

@@ -1,5 +1,8 @@
 package io.openems.edge.core.appmanager.dependency;
 
+import static java.util.Collections.emptyList;
+import static java.util.stream.Collectors.joining;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -8,8 +11,6 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.ResourceBundle;
@@ -28,17 +29,18 @@ import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.osgi.service.component.annotations.ReferencePolicy;
 import org.osgi.service.component.annotations.ReferencePolicyOption;
 import org.osgi.service.component.annotations.ServiceScope;
+import org.osgi.service.condition.Condition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import com.google.gson.JsonObject;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.exceptions.OpenemsException;
 import io.openems.common.function.ThrowingSupplier;
 import io.openems.common.session.Language;
-import io.openems.common.types.EdgeConfig;
 import io.openems.common.utils.JsonUtils;
 import io.openems.edge.common.component.ComponentManager;
 import io.openems.edge.common.user.User;
@@ -49,12 +51,19 @@ import io.openems.edge.core.appmanager.AppManagerUtil;
 import io.openems.edge.core.appmanager.ComponentUtil;
 import io.openems.edge.core.appmanager.ComponentUtilImpl;
 import io.openems.edge.core.appmanager.ConfigurationTarget;
-import io.openems.edge.core.appmanager.InterfaceConfiguration;
 import io.openems.edge.core.appmanager.OpenemsApp;
 import io.openems.edge.core.appmanager.OpenemsAppInstance;
 import io.openems.edge.core.appmanager.TranslationUtil;
 import io.openems.edge.core.appmanager.dependency.DependencyDeclaration.AppDependencyConfig;
-import io.openems.edge.core.appmanager.validator.Validator;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.AggregateTask;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.ComponentAggregateTask;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.ComponentDef;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.ComponentDef.Configuration;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.DependencyProperties;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.PersistencePredictorAggregateTask;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.SchedulerAggregateTask;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.SchedulerByCentralOrderAggregateTask;
+import io.openems.edge.core.appmanager.dependency.aggregatetask.StaticIpAggregateTask;
 
 @Component(//
 		immediate = true, //
@@ -63,6 +72,23 @@ import io.openems.edge.core.appmanager.validator.Validator;
 public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 
 	private final Logger log = LoggerFactory.getLogger(this.getClass());
+
+	@Component(service = { StartTarget.class })
+	public static class StartTarget implements Condition {
+		@Reference
+		private ComponentAggregateTask componentAggregateTask;
+		@Reference
+		private PersistencePredictorAggregateTask persistencePredictorAggregateTask;
+		@Reference
+		private SchedulerAggregateTask schedulerAggregateTask;
+		@Reference
+		private SchedulerByCentralOrderAggregateTask schedulerByCentralOrderAggregateTask;
+		@Reference
+		private StaticIpAggregateTask staticIpAggregateTask;
+	}
+
+	@Reference
+	private StartTarget startCondition;
 
 	@Reference(//
 			policy = ReferencePolicy.DYNAMIC, //
@@ -81,33 +107,31 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	private final ComponentManager componentManager;
 	private final ComponentUtil componentUtil;
 
-	private final Validator validator;
-
-	// tasks
-	private final AggregateTask.ComponentAggregateTask componentsTask;
-	private final AggregateTask.SchedulerAggregateTask schedulerTask;
-	private final AggregateTask.StaticIpAggregateTask staticIpTask;
-
-	private final AggregateTask[] tasks;
+	private final List<AggregateTask<?>> tasks = new ArrayList<>();
 
 	private TemporaryApps temporaryApps;
 
 	@Activate
 	public AppManagerAppHelperImpl(//
 			@Reference ComponentManager componentManager, //
-			@Reference ComponentUtil componentUtil, //
-			@Reference Validator validator, //
-			@Reference AggregateTask.ComponentAggregateTask componentsTask, //
-			@Reference AggregateTask.SchedulerAggregateTask schedulerTask, //
-			@Reference AggregateTask.StaticIpAggregateTask staticIpTask //
+			@Reference ComponentUtil componentUtil //
 	) {
 		this.componentManager = componentManager;
 		this.componentUtil = componentUtil;
-		this.validator = validator;
-		this.componentsTask = componentsTask;
-		this.schedulerTask = schedulerTask;
-		this.staticIpTask = staticIpTask;
-		this.tasks = new AggregateTask[] { componentsTask, schedulerTask, staticIpTask };
+	}
+
+	@Reference(//
+			cardinality = ReferenceCardinality.MULTIPLE, //
+			policy = ReferencePolicy.DYNAMIC, //
+			policyOption = ReferencePolicyOption.GREEDY //
+	)
+	private void bindAggregateTask(AggregateTask<?> task) {
+		insert(this.tasks, task);
+	}
+
+	@SuppressWarnings("unused")
+	private void unbindAggregateTask(AggregateTask<?> task) {
+		this.tasks.remove(task);
 	}
 
 	@Override
@@ -127,6 +151,47 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		return this.usingTemporaryApps(user, () -> this.deleteAppInternal(user, instance));
 	}
 
+	@Override
+	public List<AggregateTask.AggregateTaskExecutionConfiguration> getInstallConfiguration(//
+			User user, //
+			OpenemsAppInstance instance, //
+			OpenemsApp app //
+	) throws OpenemsNamedException {
+		return this.getConfigurations(user, () -> this.updateAppInternal(user, null, instance, app));
+	}
+
+	private List<AggregateTask.AggregateTaskExecutionConfiguration> getConfigurations(//
+			User user, //
+			ThrowingSupplier<UpdateValues, OpenemsNamedException> supplier //
+	) throws OpenemsNamedException {
+		Objects.requireNonNull(supplier);
+		// to make sure the temporaryApps get set to null
+		this.resetTasks();
+		this.temporaryApps = new TemporaryApps();
+		OpenemsNamedException exception = null;
+		RuntimeException runtimeException = null;
+		try {
+			supplier.get();
+		} catch (OpenemsNamedException e) {
+			exception = e;
+		} catch (RuntimeException e) {
+			runtimeException = e;
+		}
+		this.temporaryApps = null;
+		if (exception != null) {
+			this.log.error("An Exception occurred during handling the supplier.", exception);
+			throw exception;
+		}
+		if (runtimeException != null) {
+			this.log.error("An RuntimeException occurred during handling the supplier.", runtimeException);
+			throw runtimeException;
+		}
+
+		return this.tasks.stream() //
+				.map(AggregateTask::getExecutionConfiguration) //
+				.toList();
+	}
+
 	private UpdateValues usingTemporaryApps(User user, ThrowingSupplier<UpdateValues, OpenemsNamedException> supplier)
 			throws OpenemsNamedException {
 		Objects.requireNonNull(supplier);
@@ -135,6 +200,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		this.temporaryApps = new TemporaryApps();
 		OpenemsNamedException exception = null;
 		RuntimeException runtimeException = null;
+		Error internalError = null;
 		UpdateValues result = null;
 		try {
 			result = supplier.get();
@@ -142,6 +208,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			exception = e;
 		} catch (RuntimeException e) {
 			runtimeException = e;
+		} catch (Error e) {
+			internalError = e;
 		}
 		final var tempTemporarayApps = this.temporaryApps;
 		this.temporaryApps = null;
@@ -152,6 +220,10 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		if (runtimeException != null) {
 			this.log.error("An RuntimeException occurred during handling the supplier.", runtimeException);
 			throw runtimeException;
+		}
+		if (internalError != null) {
+			this.log.error("An internal error occurred during handling the supplier.", internalError);
+			throw internalError;
 		}
 
 		var ignoreInstances = new ArrayList<OpenemsAppInstance>(tempTemporarayApps.currentlyModifiedApps().size() //
@@ -164,23 +236,19 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 
 		var errors = new LinkedList<String>();
 		final var language = user == null ? null : user.getLanguage();
-		final var bundle = getTranslationBundle(language);
 
 		// execute all tasks
-		Lists.newArrayList(//
-				Map.entry(this.componentsTask, "canNotUpdateComponents"), //
-				// needs to run after component task to get the components which were created
-				Map.entry(this.schedulerTask, "canNotUpdateScheduler"), //
-				Map.entry(this.staticIpTask, "canNotUpdateStaticIps")) //
-				.forEach(entry -> {
-					try {
-						entry.getKey().create(user, otherAppConfigs);
-					} catch (OpenemsNamedException e) {
-						final var errorMessage = TranslationUtil.getTranslation(bundle, entry.getValue());
-						this.log.error(errorMessage, e);
-						errors.add(errorMessage);
-					}
-				});
+		for (var task : this.tasks) {
+			try {
+				task.create(user, otherAppConfigs);
+			} catch (OpenemsNamedException e) {
+				final var errorMessage = task.getGeneralFailMessage(language);
+				this.log.error(errorMessage, e);
+				errors.add(errorMessage);
+			} catch (RuntimeException | Error e) {
+				this.log.error("Unexpected error during Task execution.", e);
+			}
+		}
 
 		if (!errors.isEmpty()) {
 			throw new OpenemsException(errors.stream().collect(Collectors.joining("|")));
@@ -197,8 +265,6 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		final var bundle = getTranslationBundle(language);
 		final var toCreateInstances = new ArrayList<OpenemsAppInstance>();
 		if (oldInstance == null) {
-			// TODO maybe check for all apps and its dependencies
-			this.checkStatus(app, language);
 			this.temporaryApps.currentlyCreatingApps().add(newInstance);
 			toCreateInstances.add(newInstance);
 		} else {
@@ -206,7 +272,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			var references = this.getAppsWithReferenceTo(oldInstance.instanceId);
 			references.removeAll(this.temporaryApps.currentlyDeletingApps());
 			for (var entry : this.getAppManagerImpl().appConfigs(references, null)) {
-				for (var dependencieDeclaration : entry.getValue().dependencies) {
+				for (var dependencieDeclaration : entry.getValue().dependencies()) {
 
 					var dd = entry.getKey().dependencies.stream()
 							.filter(d -> d.instanceId.equals(oldInstance.instanceId))
@@ -216,7 +282,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						continue;
 					}
 
-					var dependencyApp = this.appManagerUtil.getInstanceById(dd.get().instanceId);
+					var dependencyApp = this.appManagerUtil.findInstanceById(dd.get().instanceId).orElse(null);
 
 					var appConfig = this.getAppDependencyConfig(dependencyApp, dependencieDeclaration.appConfigs);
 
@@ -232,14 +298,14 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						throw new OpenemsException(TranslationUtil.getTranslation(bundle, "appNotAllowedToBeUpdated"));
 					case ALLOW_ONLY_UNCONFIGURED_PROPERTIES:
 						// override properties
-						for (var propEntry : appConfig.properties.entrySet()) {
-							if (!newInstance.properties.has(propEntry.getKey())
-									|| !newInstance.properties.get(propEntry.getKey()).equals(propEntry.getValue())) {
+						for (var propEntry : appConfig.getProperties().values()) {
+							if (!newInstance.properties.has(propEntry.name())
+									|| !newInstance.properties.get(propEntry.name()).equals(propEntry.value())) {
 
 								warnings.add(TranslationUtil.getTranslation(bundle, "canNotChangeProperty",
-										propEntry.getKey()));
+										propEntry.name()));
 
-								newInstance.properties.add(propEntry.getKey(), propEntry.getValue());
+								newInstance.properties.add(propEntry.name(), propEntry.value());
 							}
 
 						}
@@ -267,45 +333,13 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 				ConfigurationTarget.UPDATE, language, //
 				this::determineDependencyConfig, //
 				this.includeDependency(oldInstances, toCreateInstances, language), //
-				dc -> {
-					// get old instance if existing
-					ExistingDependencyConfig oldAppConfig = null;
-					if (oldInstance != null) {
-						// TODO make sure not the parent is a dependency
-						if (dc.isDependency() && oldInstance.appId.equals(app.getAppId())) {
-							oldAppConfig = oldInstances.remove(new AppIdKey(dc.parent.getAppId(), dc.sub.key));
-							if (oldAppConfig != null) {
-								for (var entry : oldAppConfig.appDependencyConfig.properties.entrySet()) {
-									// add old values which are not set by the DependencyDeclaration
-									if (!dc.appDependencyConfig.properties.has(entry.getKey())) {
-										dc.appDependencyConfig.properties.add(entry.getKey(), entry.getValue());
-									}
-								}
-							}
-						} else {
-							AppConfiguration oldAppConfiguration = null;
-							try {
-								oldAppConfiguration = this.appManagerUtil
-										.getAppConfiguration(ConfigurationTarget.UPDATE, dc.app, oldInstance, language);
-
-							} catch (OpenemsNamedException e) {
-								this.log.error(e.getMessage());
-							}
-							var appDependencyConfig = DependencyDeclaration.AppDependencyConfig.create() //
-									.setAppId(app.getAppId()) //
-									.setAlias(oldInstance.alias) //
-									.setProperties(oldInstance.properties) //
-									.build();
-							oldAppConfig = new ExistingDependencyConfig(app, null, null, oldAppConfiguration,
-									appDependencyConfig, null, null, oldInstance);
-						}
-					}
-
+				oldInstance, oldInstances, //
+				(dc, oldAppConfig) -> {
 					// map dependencies if this is the parent
 					List<Dependency> dependencies = new ArrayList<>(dependencieInstances.size());
 					var removeKeys = new LinkedList<DependencyConfig>();
 					for (var dependency : dependencieInstances.entrySet()) {
-						if (!dc.config.dependencies.stream().anyMatch(t -> t.equals(dependency.getKey().sub))) {
+						if (!dc.config.dependencies().stream().anyMatch(t -> t.equals(dependency.getKey().sub))) {
 							continue;
 						}
 						removeKeys.add(dependency.getKey());
@@ -338,8 +372,9 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 											neededApp.get(), language);
 									for (var entry : neededApp.get().properties.entrySet()) {
 										// add old values which are not set by the DependecyDeclaration
-										if (!dc.appDependencyConfig.properties.has(entry.getKey())) {
-											dc.appDependencyConfig.properties.add(entry.getKey(), entry.getValue());
+										if (!dc.appDependencyConfig.getProperties().has(entry.getKey())) {
+											dc.appDependencyConfig.getProperties().add(entry.getKey(),
+													entry.getValue());
 										}
 									}
 
@@ -348,10 +383,10 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 									}
 
 								} catch (OpenemsNamedException e) {
-									this.log.error(e.getMessage());
+									this.log.error(e.getMessage(), e);
 									errors.add(TranslationUtil.getTranslation(bundle, "canNotGetAppConfiguration"));
 								}
-								propertiesOfNewInstance = dc.appDependencyConfig.properties;
+								propertiesOfNewInstance = dc.appDependencyConfig.getProperties().toJson();
 							} else {
 								aliasOfNewInstance = oldInstanceOfCurrentApp.alias;
 								dependencies = oldInstanceOfCurrentApp.dependencies;
@@ -364,7 +399,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 									.findFirst();
 							toCreateInstances.remove(existing.get());
 							instanceId = existing.get().instanceId;
-							propertiesOfNewInstance = dc.appDependencyConfig.initialProperties;
+							propertiesOfNewInstance = dc.appDependencyConfig.getPropertiesForInstanceCreation()
+									.toJson();
 							// use app name as default alias if not given
 							if (aliasOfNewInstance == null) {
 								aliasOfNewInstance = dc.app.getName(language);
@@ -399,14 +435,14 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 								// override properties if set by dependency
 								if (neededDependency.dependencyUpdatePolicy != DependencyDeclaration.DependencyUpdatePolicy.ALLOW_ALL) {
 									var config = this.determineDependencyConfig(neededDependency.appConfigs);
-									for (var entry : config.properties.entrySet()) {
-										if (!dc.appDependencyConfig.properties.has(entry.getKey())
-												|| !dc.appDependencyConfig.properties.get(entry.getKey())
-														.equals(entry.getValue())) {
+									for (var entry : config.getProperties().values()) {
+										if (!dc.appDependencyConfig.getProperties().has(entry.name())
+												|| !dc.appDependencyConfig.getProperties().get(entry.name())
+														.equals(entry.value())) {
 											warnings.add(TranslationUtil.getTranslation(bundle, "overrideProperty",
-													entry.getKey()));
+													entry.name()));
 										}
-										dc.appDependencyConfig.properties.add(entry.getKey(), entry.getValue());
+										dc.appDependencyConfig.getProperties().add(entry.name(), entry.value());
 									}
 								}
 
@@ -436,8 +472,9 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 							}
 						}
 
-						var newAppInstance = new OpenemsAppInstance(dc.app.getAppId(), aliasOfNewInstance, instanceId,
-								propertiesOfNewInstance, dependencies);
+						final var newAppInstance = new OpenemsAppInstance(dc.app.getAppId(), aliasOfNewInstance,
+								instanceId, propertiesOfNewInstance, dependencies);
+
 						lastCreatedOrModifiedApp.set(newAppInstance);
 						this.temporaryApps.currentlyModifiedApps().removeIf(t -> t.equals(newAppInstance));
 						this.temporaryApps.currentlyCreatingApps().removeIf(t -> t.equals(newAppInstance));
@@ -460,22 +497,22 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 							}
 
 							var newConfig = this.getNewAppConfigWithReplacedIds(dc.app, oldInstanceOfCurrentApp,
-									newAppInstance, AppManagerAppHelperImpl.getComponentsFromConfigs(otherAppConfigs),
+									newAppInstance, AppConfiguration.getComponentsFromConfigs(otherAppConfigs),
 									language);
-							this.removeNotAllowedToSavedProperties(newAppInstance);
 
 							this.aggregateAllTasks(newConfig, oldConfig);
 						} catch (OpenemsNamedException e) {
-							this.log.error(e.getMessage());
+							this.log.error(e.getMessage(), e);
 							errors.add(TranslationUtil.getTranslation(bundle, "canNotGetAppConfiguration"));
+						} finally {
+							this.removeNotAllowedToSavedProperties(newAppInstance, dc);
 						}
 						return true;
 					}
 
 					var allInstances = this.getAllInstances();
 					// add already existing dependencies only if not existing
-					for (var dependency : Optional.ofNullable(oldAppConfig.instance.dependencies)
-							.orElse(Collections.emptyList())) {
+					for (var dependency : Optional.ofNullable(oldAppConfig.instance.dependencies).orElse(emptyList())) {
 						// check if dependency is not already added
 						if (dependencies.stream().anyMatch(d -> d.key.equals(dependency.key))) {
 							continue;
@@ -516,7 +553,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 					if (isNotAllowedToUpdate) {
 						newAppInstance = oldAppConfig.instance;
 					} else {
-						var newInstanceProperties = dc.appDependencyConfig.properties;
+						var newInstanceProperties = dc.appDependencyConfig.getProperties();
 						// only add old configuration properties to updated app when it got updated by a
 						// parent app. This ensures that a property can be modified by the user on a
 						// child app and also not overwrite it when updating the parent app
@@ -530,7 +567,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 							}
 						}
 						newAppInstance = new OpenemsAppInstance(dc.app.getAppId(), newInstanceAlias,
-								oldAppConfig.instance.instanceId, newInstanceProperties, dependencies);
+								oldAppConfig.instance.instanceId, newInstanceProperties.toJson(), dependencies);
 					}
 
 					lastCreatedOrModifiedApp.set(newAppInstance);
@@ -555,16 +592,14 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						}
 
 						var newAppConfig = this.getNewAppConfigWithReplacedIds(dc.app, oldAppConfig.instance,
-								newAppInstance, AppManagerAppHelperImpl.getComponentsFromConfigs(otherAppConfigs),
-								language);
-
-						this.removeNotAllowedToSavedProperties(newAppInstance);
+								newAppInstance, AppConfiguration.getComponentsFromConfigs(otherAppConfigs), language);
 
 						this.aggregateAllTasks(newAppConfig, oldAppConfig.config);
-
 					} catch (OpenemsNamedException e) {
-						this.log.error(e.getMessage());
+						this.log.error(e.getMessage(), e);
 						errors.add(TranslationUtil.getTranslation(bundle, "canNotGetAppConfiguration"));
+					} finally {
+						this.removeNotAllowedToSavedProperties(newAppInstance, dc);
 					}
 
 					return true;
@@ -601,7 +636,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		try {
 			final var oldInstances = new TreeMap<AppIdKey, ExistingDependencyConfig>();
 			// get all existing app dependencies
-			this.foreachExistingDependency(oldInstance, ConfigurationTarget.UPDATE, language, null, dc -> {
+			this.foreachExistingDependency(oldInstance, ConfigurationTarget.VALIDATE, language, null, dc -> {
 				if (!dc.isDependency()) {
 					return true;
 				}
@@ -610,6 +645,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			});
 			return oldInstances;
 		} catch (OpenemsNamedException e) {
+			this.log.warn("Unable to get all old dependencies", e);
 			return Collections.emptyMap();
 		}
 	}
@@ -649,29 +685,29 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 					&& (d.createPolicy == DependencyDeclaration.CreatePolicy.ALWAYS //
 							|| (d.createPolicy == DependencyDeclaration.CreatePolicy.IF_NOT_EXISTING
 									&& possibleInstance.isEmpty()))) {
-				var config = this.determineDependencyConfig(d.appConfigs);
-				String appId;
-				UUID id = null;
-				List<Dependency> dependencies = null;
-				if (config.appId != null) {
-					appId = config.appId;
-					id = UUID.randomUUID();
-				} else {
-					var instance = this.appManagerUtil.getInstanceById(config.specificInstanceId);
-					appId = instance.appId;
-					id = instance.instanceId;
-					dependencies = instance.dependencies;
-				}
 				try {
+					var config = this.determineDependencyConfig(d.appConfigs);
+					String appId;
+					UUID id = null;
+					List<Dependency> dependencies = null;
+					if (config.appId != null) {
+						appId = config.appId;
+						id = UUID.randomUUID();
+					} else {
+						var instance = this.appManagerUtil.findInstanceById(config.specificInstanceId).orElse(null);
+						appId = instance.appId;
+						id = instance.instanceId;
+						dependencies = instance.dependencies;
+					}
 					// check if an instance can be created
 					this.appManagerUtil.getAppConfiguration(ConfigurationTarget.ADD, config.appId, config.alias,
-							config.initialProperties, language);
-					var instance = new OpenemsAppInstance(appId, config.alias, id, config.initialProperties,
-							dependencies);
+							config.getPropertiesForInstanceCreation().toJson(), language);
+					var instance = new OpenemsAppInstance(appId, config.alias, id,
+							config.getPropertiesForInstanceCreation().toJson(), dependencies);
 					this.temporaryApps.currentlyCreatingApps().add(instance);
 					toCreateInstances.add(instance);
 					return IncludeApp.INCLUDE_WITH_DEPENDENCIES;
-				} catch (NoSuchElementException | OpenemsNamedException ex) {
+				} catch (OpenemsNamedException ex) {
 					// app not found or config cant be get
 					return IncludeApp.NOT_INCLUDED;
 				}
@@ -711,15 +747,23 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	 * Removes properties which should not get saved e. g. passwords.
 	 * 
 	 * @param instance The {@link OpenemsAppInstance} to remove the properties from
+	 * @param dc       The {@link DependencyConfig} to remove the properties from
 	 */
-	private void removeNotAllowedToSavedProperties(OpenemsAppInstance instance) {
+	private void removeNotAllowedToSavedProperties(OpenemsAppInstance instance, DependencyConfig dc) {
 		try {
-			final var app = this.appManagerUtil.getAppById(instance.appId);
+			final var app = this.appManagerUtil.findAppById(instance.appId).orElse(null);
+			if (app == null) {
+				return;
+			}
 			Arrays.stream(app.getProperties()) //
 					.filter(t -> !t.isAllowedToSave) //
-					.forEach(t -> instance.properties.remove(t.name));
-		} catch (NoSuchElementException e) {
-			// app not found
+					.forEach(t -> {
+						instance.properties.remove(t.name);
+						if (dc != null) {
+							dc.appDependencyConfig.getProperties().remove(t.name);
+							dc.appDependencyConfig.getPropertiesForInstanceCreation().remove(t.name);
+						}
+					});
 		} catch (UnsupportedOperationException e) {
 			// getting properties not supported
 		}
@@ -728,8 +772,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	private DependencyDeclaration.AppDependencyConfig getAppDependencyConfig(OpenemsAppInstance instance,
 			List<DependencyDeclaration.AppDependencyConfig> appDependencyConfigs) {
 		for (var config : appDependencyConfigs) {
-			if (config.appId != null && config.appId.equals(instance.appId)
-					|| config.specificInstanceId.equals(instance.instanceId)) {
+			if ((config.appId != null && config.appId.equals(instance.appId))
+					|| (config.specificInstanceId != null && config.specificInstanceId.equals(instance.instanceId))) {
 				return config;
 			}
 		}
@@ -739,8 +783,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	private final DependencyDeclaration getNeededDependencyTo(OpenemsAppInstance instance, String appId,
 			UUID instanceId) {
 		try {
-			var neededDependencies = this.appManagerUtil.getAppConfiguration(ConfigurationTarget.UPDATE, instance,
-					null).dependencies;
+			var neededDependencies = this.appManagerUtil.getAppConfiguration(ConfigurationTarget.UPDATE, instance, null)
+					.dependencies();
 			if (neededDependencies == null || neededDependencies.isEmpty()) {
 				return null;
 			}
@@ -796,11 +840,11 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 
 		@Override
 		public boolean equals(Object other) {
-			if (!(other instanceof AppIdKey)) {
+			if (!(other instanceof AppIdKey aik)) {
 				return false;
 			}
 
-			return ((AppIdKey) other).compareTo(this) == 0;
+			return aik.compareTo(this) == 0;
 		}
 
 		@Override
@@ -816,9 +860,16 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	}
 
 	private UpdateValues deleteAppInternal(User user, OpenemsAppInstance instance) throws OpenemsNamedException {
-
 		final var language = user == null ? null : user.getLanguage();
 		final var bundle = getTranslationBundle(language);
+
+		final var app = this.appManagerUtil.findAppById(instance.appId).orElse(null);
+		if (app != null && user != null) {
+			final var permissions = app.getAppPermissions();
+			if (user.getRole().isLessThan(permissions.canDelete())) {
+				throw new OpenemsException("Access denied for User with Role '" + user.getRole().name() + "'");
+			}
+		}
 
 		BiFunction<OpenemsAppInstance, OpenemsAppInstance, Boolean> includeInstance = (p, i) -> {
 			if (p != null) {
@@ -832,7 +883,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						return false;
 					}
 
-					var dependencyDeclaration = config.dependencies.stream()
+					var dependencyDeclaration = config.dependencies().stream()
 							.filter(dd -> dd.key.equals(dependency.get().key)).findFirst();
 
 					if (dependencyDeclaration.isEmpty()) {
@@ -855,7 +906,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						break;
 					}
 
-				} catch (OpenemsNamedException | NoSuchElementException e) {
+				} catch (OpenemsNamedException e) {
 					// don't include instance if broken
 					return false;
 				}
@@ -893,8 +944,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 
 					var copy = dc.instance.properties.deepCopy();
 					// override properties
-					for (var entry : dc.appDependencyConfig.properties.entrySet()) {
-						copy.add(entry.getKey(), entry.getValue());
+					for (var entry : dc.appDependencyConfig.getProperties().values()) {
+						copy.add(entry.name(), entry.value());
 					}
 
 					try {
@@ -960,16 +1011,50 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 				.collect(Collectors.toList());
 	}
 
+	@SuppressWarnings("unchecked")
 	private final void aggregateAllTasks(AppConfiguration instance, AppConfiguration oldInstance) {
+		Function<AppConfiguration, List<Task<?>>> notExistingTask = config -> {
+			return Optional.ofNullable(config) //
+					.map(c -> c.tasks().stream() //
+							.filter(t -> this.tasks.stream() //
+									.noneMatch(ot -> ot.getClass().isAssignableFrom(t.aggregateTaskClass()))) //
+							.collect(Collectors.toList()) //
+			).orElse(Lists.newArrayList());
+		};
+
+		var notAbleToExecuteTasks = notExistingTask.apply(instance);
+		notAbleToExecuteTasks.addAll(notExistingTask.apply(oldInstance));
+		if (!notAbleToExecuteTasks.isEmpty()) {
+			// TODO maybe throw exception and return
+			this.log.warn("Unable to find Task implementations for " + notAbleToExecuteTasks.stream() //
+					.map(t -> t.aggregateTaskClass().getSimpleName()) //
+					.collect(joining(", ")));
+		}
+
 		for (var task : this.tasks) {
-			task.aggregate(instance, oldInstance);
+			var newConfiguration = Optional.ofNullable(instance) //
+					.map(c -> c.getConfiguration(task.getClass())) //
+					.orElse(null);
+
+			var oldConfiguration = Optional.ofNullable(oldInstance) //
+					.map(c -> c.getConfiguration(task.getClass())) //
+					.orElse(null);
+
+			if (newConfiguration == null && oldConfiguration == null) {
+				continue;
+			}
+
+			this.aggregateTask(task, newConfiguration, oldConfiguration);
 		}
 	}
 
+	@SuppressWarnings("unchecked")
+	private <T> void aggregateTask(AggregateTask<T> aggregateTask, Object newConfig, Object oldConfig) {
+		aggregateTask.aggregate((T) newConfig, (T) oldConfig);
+	}
+
 	private void resetTasks() {
-		for (var task : this.tasks) {
-			task.reset();
-		}
+		this.tasks.forEach(AggregateTask::reset);
 	}
 
 	/**
@@ -989,7 +1074,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 				if (!dependency.instanceId.equals(instance.instanceId)) {
 					continue;
 				}
-				var declaration = entry.getValue().dependencies.stream().filter(dd -> dd.key.equals(dependency.key))
+				var declaration = entry.getValue().dependencies().stream().filter(dd -> dd.key.equals(dependency.key))
 						.findAny();
 
 				// declaration not found for dependency
@@ -1006,43 +1091,6 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			}
 		}
 		return true;
-	}
-
-	protected void checkStatus(OpenemsApp openemsApp, Language language) throws OpenemsNamedException {
-		var validatorConfig = openemsApp.getValidatorConfig();
-		var status = this.validator.getStatus(validatorConfig);
-		switch (status) {
-		case INCOMPATIBLE:
-			throw new OpenemsException("App is not compatible! " + this.validator
-					.getErrorCompatibleMessages(validatorConfig, language).stream().collect(Collectors.joining(";")));
-		case COMPATIBLE:
-			throw new OpenemsException("App can not be installed! " + this.validator
-					.getErrorInstallableMessages(validatorConfig, language).stream().collect(Collectors.joining(";")));
-		case INSTALLABLE:
-			// app can be installed
-			return;
-		}
-		throw new OpenemsException("Status '" + status.name() + "' is not implemented.");
-	}
-
-	protected static List<EdgeConfig.Component> getComponentsFromConfigs(List<AppConfiguration> configs) {
-		return mapAppConfiguration(configs, c -> c.components);
-	}
-
-	protected static List<String> getSchedulerIdsFromConfigs(List<AppConfiguration> configs) {
-		return mapAppConfiguration(configs, c -> c.schedulerExecutionOrder);
-	}
-
-	protected static List<InterfaceConfiguration> getStaticIpsFromConfigs(List<AppConfiguration> configs) {
-		return mapAppConfiguration(configs, c -> c.ips);
-	}
-
-	private static <T> List<T> mapAppConfiguration(List<AppConfiguration> configs,
-			Function<AppConfiguration, List<T>> mapper) {
-		return configs.stream() //
-				.map(mapper) //
-				.flatMap(l -> l.stream()) //
-				.collect(Collectors.toList());
 	}
 
 	/**
@@ -1107,7 +1155,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	 * @param addConfig                 returns true if the instance gets created or
 	 *                                  already exists
 	 * @param sub                       the {@link DependencyDeclaration}
-	 * @param l                         the {@link Language}
+	 * @param language                  the {@link Language}
 	 * @param parent                    the parent app
 	 * @param alreadyIteratedInstances  the instances that already got iterated thru
 	 *                                  to avoid endless loop. e. g. if two apps
@@ -1119,27 +1167,90 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	 * @param includeResult             the includeResult of the last iteration to
 	 *                                  know if only the app without its
 	 *                                  dependencies should be included
+	 * @param oldMasterInstance         the previous {@link OpenemsAppInstance}
+	 *                                  which was updated by the user
+	 * @param oldInstances              all previous {@link OpenemsAppInstance
+	 *                                  OpenemsAppInstances}
 	 * @return the last {@link DependencyConfig}
 	 * @throws OpenemsNamedException on error
 	 */
-	private DependencyConfig foreachDependency(List<String> errors, OpenemsApp app, AppDependencyConfig appConfig,
-			ConfigurationTarget target, Function<DependencyConfig, Boolean> addConfig, DependencyDeclaration sub,
-			Language l, OpenemsApp parent, Set<UUID> alreadyIteratedInstances,
-			Function<List<AppDependencyConfig>, AppDependencyConfig> determineDependencyConfig,
-			BiFunction<OpenemsApp, DependencyDeclaration, IncludeApp> includeDependency, IncludeApp includeResult)
-			throws OpenemsNamedException {
+	private DependencyConfig foreachDependency(//
+			List<String> errors, //
+			OpenemsApp app, //
+			AppDependencyConfig appConfig, //
+			ConfigurationTarget target, //
+			BiFunction<DependencyConfig, ExistingDependencyConfig, Boolean> addConfig, //
+			DependencyDeclaration sub, //
+			Language language, //
+			OpenemsApp parent, //
+			Set<UUID> alreadyIteratedInstances, //
+			Function<List<AppDependencyConfig>, AppDependencyConfig> determineDependencyConfig, //
+			BiFunction<OpenemsApp, DependencyDeclaration, IncludeApp> includeDependency, //
+			IncludeApp includeResult, //
+			OpenemsAppInstance oldMasterInstance, //
+			Map<AppIdKey, ExistingDependencyConfig> oldInstances //
+	) {
 		if (alreadyIteratedInstances == null) {
 			alreadyIteratedInstances = new HashSet<>();
 		}
 		AppConfiguration config = null;
+		var oldConfig = this.getOldAppConfig(//
+				new DependencyConfig(app, parent, sub, null, appConfig, null), //
+				app, oldMasterInstance, oldInstances, language //
+		);
+
 		try {
-			config = this.appManagerUtil.getAppConfiguration(target, app, appConfig.alias, appConfig.initialProperties,
-					l);
+			if (oldConfig == null) {
+				final var comps = this.getAppManagerImpl()
+						.getOtherAppConfigurations(alreadyIteratedInstances.toArray(UUID[]::new)) //
+						.stream().flatMap(c -> c.getComponents().stream()).collect(Collectors.toList());
+				OpenemsAppInstance instance = null;
+				if (sub != null && appConfig.specificInstanceId != null) {
+					instance = this.getInstance(appConfig.specificInstanceId);
+				}
+
+				var newInstance = new OpenemsAppInstance(app.getAppId(), appConfig.alias,
+						appConfig.specificInstanceId == null ? UUID.randomUUID() : appConfig.specificInstanceId,
+						appConfig.getPropertiesForInstanceCreation().toJson(), null);
+
+				config = this.getNewAppConfigWithReplacedIds(//
+						app, //
+						instance, //
+						newInstance, //
+						comps, //
+						language //
+				);
+
+				appConfig = appConfig //
+						.withInitialProperties(DependencyProperties.fromJson(newInstance.properties))
+						.withProperties(DependencyProperties.fromJson(newInstance.properties));
+
+			} else {
+				// add old properties
+				final var newProps = appConfig.getPropertiesForInstanceCreation().deepCopy();
+				for (var prop : oldConfig.instance.properties.entrySet()) {
+					if (newProps.has(prop.getKey())) {
+						continue;
+					}
+					newProps.add(prop.getKey(), prop.getValue());
+				}
+				final var newInstanceId = appConfig.specificInstanceId == null ? oldConfig.instance.instanceId
+						: appConfig.specificInstanceId;
+
+				final var skipIds = Sets.newHashSet(alreadyIteratedInstances);
+				skipIds.add(newInstanceId);
+				final var comps = this.getAppManagerImpl()
+						.getOtherAppConfigurations(skipIds.stream().toArray(UUID[]::new)) //
+						.stream().flatMap(c -> c.getComponents().stream()).collect(Collectors.toList());
+				config = this.getNewAppConfigWithReplacedIds(app, oldConfig.instance, //
+						new OpenemsAppInstance(app.getAppId(), appConfig.alias, newInstanceId, newProps.toJson(), null), //
+						comps, language);
+			}
 		} catch (OpenemsNamedException e) {
 			// can not get config of app
-			this.log.error(e.getMessage());
-			errors.add(TranslationUtil.getTranslation(getTranslationBundle(l), "canNotGetAppConfigurationOfApp",
-					app.getName(l)));
+			this.log.error(e.getMessage(), e);
+			errors.add(TranslationUtil.getTranslation(getTranslationBundle(language), "canNotGetAppConfigurationOfApp",
+					app.getName(language)));
 		}
 		if (config == null) {
 			return null;
@@ -1147,70 +1258,131 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		var dependencies = new LinkedList<DependencyConfig>();
 		if (includeResult == IncludeApp.INCLUDE_WITH_DEPENDENCIES) {
 
-			for (var dependency : config.dependencies) {
+			for (var dependency : config.dependencies()) {
 				var nextAppConfig = determineDependencyConfig.apply(dependency.appConfigs);
 				if (nextAppConfig == null) {
 					// can not determine one out of many configs
 					continue;
 				}
-				try {
-					OpenemsApp dependencyApp;
-					if (nextAppConfig.appId != null) {
-						dependencyApp = this.appManagerUtil.getAppById(nextAppConfig.appId);
-					} else {
-						if (alreadyIteratedInstances.contains(nextAppConfig.specificInstanceId)) {
-							continue;
-						}
-						alreadyIteratedInstances.add(nextAppConfig.specificInstanceId);
-						var specificApp = this.getInstance(nextAppConfig.specificInstanceId);
-						dependencyApp = this.appManagerUtil.getAppById(specificApp.appId);
-						// fill up properties of existing app to make sure the appConfig can be get
-						specificApp.properties.entrySet().forEach(entry -> {
-							if (nextAppConfig.properties.has(entry.getKey())) {
-								return;
-							}
-							nextAppConfig.properties.add(entry.getKey(), entry.getValue());
-						});
-					}
-
-					var include = includeDependency.apply(app, dependency);
-					if (include == IncludeApp.NOT_INCLUDED) {
+				OpenemsApp dependencyApp;
+				if (nextAppConfig.appId != null) {
+					dependencyApp = this.appManagerUtil.findAppById(nextAppConfig.appId).orElse(null);
+				} else {
+					if (alreadyIteratedInstances.contains(nextAppConfig.specificInstanceId)) {
 						continue;
 					}
+					alreadyIteratedInstances.add(nextAppConfig.specificInstanceId);
+					var specificApp = this.getInstance(nextAppConfig.specificInstanceId);
+					dependencyApp = this.appManagerUtil.findAppById(specificApp.appId).orElse(null);
+					// fill up properties of existing app to make sure the appConfig can be get
+					specificApp.properties.entrySet().forEach(entry -> {
+						if (nextAppConfig.getProperties().has(entry.getKey())) {
+							return;
+						}
+						nextAppConfig.getProperties().add(entry.getKey(), entry.getValue());
+					});
+				}
+				if (dependencyApp == null) {
+					continue;
+				}
 
-					var addingConfig = this.foreachDependency(errors, dependencyApp, nextAppConfig, target, addConfig,
-							dependency, l, app, alreadyIteratedInstances, determineDependencyConfig, includeDependency,
-							include);
-					if (addingConfig != null) {
-						dependencies.add(addingConfig);
-					}
-				} catch (NoSuchElementException e) {
-					// can not find app
-					e.printStackTrace();
+				var include = includeDependency.apply(app, dependency);
+				if (include == IncludeApp.NOT_INCLUDED) {
+					continue;
+				}
+
+				var addingConfig = this.foreachDependency(errors, dependencyApp, nextAppConfig, target, addConfig,
+						dependency, language, app, alreadyIteratedInstances, determineDependencyConfig,
+						includeDependency, include, oldMasterInstance, oldInstances);
+				if (addingConfig != null) {
+					dependencies.add(addingConfig);
 				}
 			}
 
 		}
 		var newConfig = new DependencyConfig(app, parent, sub, config, appConfig, dependencies);
-		if (addConfig.apply(newConfig)) {
+		if (addConfig.apply(newConfig, oldConfig)) {
 			return newConfig;
 		}
 		return null;
 	}
 
-	private void foreachDependency(List<String> errors, OpenemsApp app, String alias, JsonObject defaultProperties,
-			ConfigurationTarget target, Language l,
-			Function<List<AppDependencyConfig>, AppDependencyConfig> determineDependencyConfig,
-			BiFunction<OpenemsApp, DependencyDeclaration, IncludeApp> includeDependency,
-			Function<DependencyConfig, Boolean> consumer) throws OpenemsNamedException {
+	private void foreachDependency(//
+			List<String> errors, //
+			OpenemsApp app, //
+			String alias, //
+			JsonObject defaultProperties, //
+			ConfigurationTarget target, //
+			Language l, //
+			Function<List<AppDependencyConfig>, AppDependencyConfig> determineDependencyConfig, //
+			BiFunction<OpenemsApp, DependencyDeclaration, IncludeApp> includeDependency, //
+			OpenemsAppInstance oldMasterInstance, //
+			Map<AppIdKey, ExistingDependencyConfig> oldInstances, //
+			BiFunction<DependencyConfig, ExistingDependencyConfig, Boolean> consumer //
+	) {
 		var appConfig = DependencyDeclaration.AppDependencyConfig.create() //
 				.setAppId(app.getAppId()) //
 				.setAlias(alias) //
-				.setProperties(defaultProperties) //
+				.setProperties(DependencyProperties.fromJson(defaultProperties)) //
 				.build();
 
-		this.foreachDependency(errors, app, appConfig, target, consumer, null, l, null, null, determineDependencyConfig,
-				includeDependency, IncludeApp.INCLUDE_WITH_DEPENDENCIES);
+		var resultConfig = this.foreachDependency(errors, app, appConfig, target, consumer, null, l, null, null,
+				determineDependencyConfig, includeDependency, IncludeApp.INCLUDE_WITH_DEPENDENCIES, oldMasterInstance,
+				oldInstances);
+
+		var updatedAppConfig = resultConfig != null ? resultConfig.appDependencyConfig : appConfig;
+
+		defaultProperties.entrySet().clear();
+		for (var entry : updatedAppConfig.getProperties().toJson().entrySet()) {
+			defaultProperties.add(entry.getKey(), entry.getValue());
+		}
+	}
+
+	private ExistingDependencyConfig getOldAppConfig(//
+			DependencyConfig dc, //
+			OpenemsApp app, //
+			OpenemsAppInstance oldMasterInstance, //
+			Map<AppIdKey, ExistingDependencyConfig> oldInstances, //
+			Language language //
+	) {
+		if (oldMasterInstance == null) {
+			return null;
+		}
+		ExistingDependencyConfig oldAppConfig = null;
+		if (dc.isDependency()) {
+			oldAppConfig = oldInstances.remove(new AppIdKey(dc.parent.getAppId(), dc.sub.key));
+
+			// if not found check if there is a old instance with the given app id
+			if (oldAppConfig == null) {
+				oldAppConfig = oldInstances.remove(new AppIdKey(dc.parent.getAppId(), dc.sub.key, dc.app.getAppId()));
+			}
+
+			if (oldAppConfig != null) {
+				for (var entry : oldAppConfig.appDependencyConfig.getProperties().values()) {
+					// add old values which are not set by the DependencyDeclaration
+					if (!dc.appDependencyConfig.getProperties().has(entry.name())) {
+						dc.appDependencyConfig.getProperties().add(entry.name(), entry.value());
+					}
+				}
+			}
+		} else {
+			AppConfiguration oldAppConfiguration = null;
+			try {
+				oldAppConfiguration = this.appManagerUtil.getAppConfiguration(ConfigurationTarget.UPDATE, dc.app,
+						oldMasterInstance, language);
+
+			} catch (OpenemsNamedException e) {
+				this.log.error(e.getMessage());
+			}
+			var appDependencyConfig = DependencyDeclaration.AppDependencyConfig.create() //
+					.setAppId(app.getAppId()) //
+					.setAlias(oldMasterInstance.alias) //
+					.setProperties(DependencyProperties.fromJson(oldMasterInstance.properties)) //
+					.build();
+			oldAppConfig = new ExistingDependencyConfig(app, null, null, oldAppConfiguration, appDependencyConfig, null,
+					null, oldMasterInstance);
+		}
+		return oldAppConfig;
 	}
 
 	private OpenemsAppInstance getInstance(UUID id) {
@@ -1221,11 +1393,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 				return instance.get();
 			}
 		}
-		try {
-			return this.appManagerUtil.getInstanceById(id);
-		} catch (NoSuchElementException e) {
-			return null;
-		}
+		return this.appManagerUtil.findInstanceById(id).orElse(null);
 	}
 
 	/**
@@ -1256,7 +1424,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 					.filter(i -> i.appId.equals(config.appId)).collect(Collectors.toList());
 			for (var instance : instances) {
 				var existingDependencies = this.appManagerUtil.getAppsWithDependencyTo(instance);
-				if (existingDependencies.isEmpty()) {
+				if (!existingDependencies.isEmpty()) {
 					return config;
 				}
 			}
@@ -1297,7 +1465,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			alreadyIteratedApps = new HashSet<>();
 		}
 		alreadyIteratedApps.add(instance);
-		var app = this.appManagerUtil.getAppById(instance.appId);
+		var app = this.appManagerUtil.findAppById(instance.appId).orElse(null);
 		var config = this.appManagerUtil.getAppConfiguration(target, app, instance, l);
 
 		var dependecies = new ArrayList<DependencyConfig>();
@@ -1306,34 +1474,33 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			if (instance.dependencies != null) {
 				dependecies = new ArrayList<>(instance.dependencies.size());
 				for (var dependency : instance.dependencies) {
-					try {
-						var dependencyApp = this.appManagerUtil.getInstanceById(dependency.instanceId);
-						if (alreadyIteratedApps.contains(dependencyApp)) {
-							continue;
-						}
-						var subApp = config.dependencies.stream().filter(t -> t.key.equals(dependency.key)).findFirst()
-								.get();
-						var dependencyConfig = this.foreachExistingDependency(dependencyApp, target, consumer, instance,
-								subApp, l, alreadyIteratedApps, includeInstance);
-						if (dependencyConfig != null) {
-							dependecies.add(dependencyConfig);
-						}
-					} catch (NoSuchElementException e) {
-						// can not find app
+					var dependencyApp = this.appManagerUtil.findInstanceById(dependency.instanceId).orElse(null);
+					if (dependencyApp == null) {
+						continue;
+					}
+					if (alreadyIteratedApps.contains(dependencyApp)) {
+						continue;
+					}
+					var subApp = config.dependencies().stream().filter(t -> t.key.equals(dependency.key)).findFirst()
+							.get();
+					var dependencyConfig = this.foreachExistingDependency(dependencyApp, target, consumer, instance,
+							subApp, l, alreadyIteratedApps, includeInstance);
+					if (dependencyConfig != null) {
+						dependecies.add(dependencyConfig);
 					}
 				}
 			}
 		}
 		OpenemsApp parentApp = null;
 		if (parent != null) {
-			parentApp = this.appManagerUtil.getAppById(parent.appId);
+			parentApp = this.appManagerUtil.findAppById(parent.appId).orElse(null);
 		}
 
 		DependencyDeclaration.AppDependencyConfig dependencyAppConfig;
 		if (sub == null) {
 			dependencyAppConfig = DependencyDeclaration.AppDependencyConfig.create() //
 					.setAppId(instance.appId) //
-					.setProperties(instance.properties) //
+					.setProperties(DependencyProperties.fromJson(instance.properties)) //
 					.setAlias(instance.alias) //
 					.build();
 		} else {
@@ -1363,18 +1530,15 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		var config = app.getAppConfiguration(ConfigurationTarget.TEST, properties, null);
 		var copy = properties.deepCopy();
 
-		Map<String, String> defaultIdToCurrentId = new HashMap<>();
+		Map<String, String> propertyKeyToCurrentId = new HashMap<>();
 		// remove already set ids
-		for (var component : config.components) {
+		for (var component : config.getComponents()) {
 			String removeKey = null;
 			for (var entry : copy.entrySet()) {
 				var id = JsonUtils.getAsOptionalString(entry.getValue()).orElse(null);
-				if (id != null && component.getId().startsWith(id)) {
+				if (id != null && component.id().startsWith(id)) {
 					removeKey = entry.getKey();
-					final var myId = id;
-					final var defaultId = component.getId() //
-							.substring(component.getId().indexOf(':') + 1);
-					defaultIdToCurrentId.put(defaultId, myId);
+					propertyKeyToCurrentId.put(entry.getKey(), id);
 					break;
 				}
 			}
@@ -1385,15 +1549,15 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 
 		config = app.getAppConfiguration(ConfigurationTarget.TEST, copy, null);
 
-		for (var comp : config.components) {
-			copy.addProperty(comp.getId(), prefix);
+		for (var comp : config.getComponents()) {
+			copy.addProperty(comp.id(), prefix);
 		}
 		var configWithNewIds = app.getAppConfiguration(ConfigurationTarget.TEST, copy, null);
 		Map<String, String> replaceableComponentIds = new HashMap<>();
-		for (var comp : configWithNewIds.components) {
-			if (comp.getId().startsWith(prefix)) {
+		for (var comp : configWithNewIds.getComponents()) {
+			if (comp.id().startsWith(prefix)) {
 				// "METER_ID:meter0"
-				var raw = comp.getId().substring(prefix.length());
+				var raw = comp.id().substring(prefix.length());
 				// ["METER_ID", "meter0"]
 				var pieces = raw.split(":");
 				// "METER_ID"
@@ -1405,7 +1569,7 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		}
 
 		return replaceableComponentIds.entrySet().stream() //
-				.map(entry -> new ReplacableIds(defaultIdToCurrentId.get(entry.getValue()), //
+				.map(entry -> new ReplacableIds(propertyKeyToCurrentId.get(entry.getKey()), //
 						entry.getValue(), entry.getKey())) //
 				.collect(Collectors.toList()); //
 	}
@@ -1436,13 +1600,30 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 	 * @return the AppConfiguration with the replaced ID s of the components
 	 * @throws OpenemsNamedException on error
 	 */
-	private AppConfiguration getNewAppConfigWithReplacedIds(OpenemsApp app, OpenemsAppInstance oldAppInstance,
-			OpenemsAppInstance newAppInstance, List<EdgeConfig.Component> otherAppComponents, Language language)
-			throws OpenemsNamedException {
+	private AppConfiguration getNewAppConfigWithReplacedIds(//
+			OpenemsApp app, //
+			OpenemsAppInstance oldAppInstance, //
+			OpenemsAppInstance newAppInstance, //
+			List<ComponentDef> otherAppComponents, //
+			Language language //
+	) throws OpenemsNamedException {
 
-		var target = oldAppInstance == null ? ConfigurationTarget.ADD : ConfigurationTarget.UPDATE;
+		final var target = oldAppInstance == null ? ConfigurationTarget.ADD : ConfigurationTarget.UPDATE;
 
 		final var replacableIds = this.getReplaceableComponentIds(app, newAppInstance.properties);
+
+		// set old ids from configuration
+		if (oldAppInstance != null) {
+			final var oldIds = this.getReplaceableComponentIds(app, oldAppInstance.properties);
+			for (var repId : oldIds) {
+				final var found = replacableIds.stream().filter(t -> t.key.equals(repId.key)).findAny().orElse(null);
+				if (found == null) {
+					continue;
+				}
+				replacableIds.remove(found);
+				replacableIds.add(repId);
+			}
+		}
 		final var propertiesCopy = newAppInstance.properties.deepCopy();
 
 		var indexToId = new HashMap<String, ReplacableIds>();
@@ -1456,67 +1637,80 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		var newAppConfig = this.appManagerUtil.getAppConfiguration(target, app, newAppInstance.alias, propertiesCopy,
 				language);
 
-		final var orderedComponents = ComponentUtilImpl.order(newAppConfig.components);
+		final var orderedComponents = ComponentUtilImpl.order(newAppConfig.getComponents());
 		final var iterator = new ArrayList<>(orderedComponents).iterator();
 		for (int i = 0; iterator.hasNext(); i++) {
 			final var comp = iterator.next();
 
-			var isNewComponent = true;
-			final var replacableId = indexToId.get(comp.getId());
+			final var replacableId = indexToId.get(comp.id());
 			final var canBeReplaced = replacableId != null;
-			final var originalId = canBeReplaced ? replacableId.predefinedId : comp.getId();
+			final var originalId = canBeReplaced ? replacableId.predefinedId : comp.id();
+			final var expliciteSet = canBeReplaced && oldAppInstance == null
+					&& newAppInstance.properties.get(replacableId.key) != null;
 			var id = originalId;
-			EdgeConfig.Component foundComponent = null;
+			ComponentDef foundComponent = null;
 
+			if (!canBeReplaced && comp.config().installAlways()) {
+				throw new OpenemsException(
+						"Configuration field 'installAlways' can not be used for static component ids");
+			}
+
+			// if component is configured to always be installed ignore the same config
+			// check
 			// try to find a component with the necessary settings
 			// has to be at first place to make sure no unnecessary components are created
 			if (canBeReplaced) {
-				// TODO include currently creating components
-				foundComponent = this.componentUtil.getComponentByConfig(comp);
+				foundComponent = ComponentDef.from(this.componentUtil.getComponentByConfig(comp));
 				if (foundComponent != null) {
-					id = foundComponent.getId();
+					id = foundComponent.id();
 				}
+			}
+
+			if (comp.config().installAlways()) {
+				foundComponent = null;
 			}
 
 			// use component based on the last configuration
 			if (foundComponent == null && oldAppInstance != null && canBeReplaced
 					&& oldAppInstance.properties.has(replacableId.key)) {
 				id = oldAppInstance.properties.get(replacableId.key).getAsString();
-				foundComponent = this.componentManager.getEdgeConfig().getComponent(id).orElse(null);
+				foundComponent = ComponentDef.from(this.componentManager.getEdgeConfig().getComponent(id).orElse(null));
 				final var tempId = id;
 				// other app uses the same component because they had the same configuration
 				// now this app needs the component with a different configuration so now create
 				// a new component
-				if (foundComponent != null && (!foundComponent.getFactoryId().equals(comp.getFactoryId())
-						|| otherAppComponents.stream().anyMatch(t -> t.getId().equals(tempId)))) {
+				if (foundComponent != null && (!foundComponent.factoryId().equals(comp.factoryId())
+						|| otherAppComponents.stream().anyMatch(t -> t.id().equals(tempId)))) {
 					foundComponent = null;
 				}
 			}
 
-			isNewComponent = isNewComponent && foundComponent == null;
-			if (isNewComponent) {
+			if (foundComponent == null) {
 				// if the id is not already set and there is no component with the default id
 				// then use the default id
-				foundComponent = this.componentManager.getEdgeConfig().getComponent(originalId).orElse(null);
+				foundComponent = ComponentDef
+						.from(this.componentManager.getEdgeConfig().getComponent(originalId).orElse(null));
 				if (foundComponent == null) {
 					// find component for currently creating apps
-					for (var entry : this.getAppManagerImpl().appConfigs(
-							this.temporaryApps.currentlyCreatingModifiedApps(),
-							AppManagerImpl.excludingInstanceIds(newAppInstance.instanceId))) {
-						foundComponent = entry.getValue().components.stream()
-								.filter(t -> t.getId().equals(comp.getId())).findFirst().orElse(null);
-						if (foundComponent != null) {
-							break;
-						}
-
-					}
+					foundComponent = otherAppComponents.stream().filter(component -> {
+						var edgeConfigComponent = component.toEdgeConfigComponent();
+						return edgeConfigComponent.getFactoryId().equals(comp.factoryId()) //
+								&& edgeConfigComponent.getProperties()
+										.equals(comp.toEdgeConfigComponent().getProperties());
+					}) //
+							.findFirst() //
+							.orElse(null);
 				}
+
 				var sameIdInComponents = orderedComponents.subList(0, i).stream() //
 						.map(c -> {
-							var repId = indexToId.get(c.getId());
-							return repId != null ? repId.defaultId : c.getId();
+							var repId = indexToId.get(c.id());
+							return repId != null ? repId.defaultId : c.id();
 						}) //
 						.anyMatch(t -> t.equals(originalId));
+
+				var usedInOtherApps = otherAppComponents.stream().map(ComponentDef::id)
+						.anyMatch(compId -> compId.equals(originalId));
 
 				var usedInPreviousConfig = false;
 				final var alreadyUsedIds = new ArrayList<String>();
@@ -1536,7 +1730,10 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 					}
 				}
 
-				if (foundComponent == null && !sameIdInComponents && !usedInPreviousConfig) {
+				if (foundComponent == null && !sameIdInComponents && !usedInPreviousConfig
+						&& !comp.config().installAlways() && !usedInOtherApps) {
+					id = originalId;
+				} else if (foundComponent != null && expliciteSet) {
 					id = originalId;
 				} else {
 					// replace number at the end and get the next available id
@@ -1551,13 +1748,17 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 						}
 					} else {
 						var startingNumber = Integer.parseInt(startingNumberString);
-						var ids = new ArrayList<>(orderedComponents).stream() //
-								.map(EdgeConfig.Component::getId) //
-								.collect(Collectors.toList());
-						// add id if it was in the old configuration
-						ids.addAll(alreadyUsedIds);
 
-						var nextAvailableId = this.componentUtil.getNextAvailableId(baseName, startingNumber, ids);
+						List<String> componentIds = new ArrayList<>(otherAppComponents.stream() //
+								.map(ComponentDef::id) //
+								.toList());
+
+						orderedComponents.stream() //
+								.map(ComponentDef::id) //
+								.forEach(componentIds::add);
+
+						var nextAvailableId = this.componentUtil.getNextAvailableId(baseName, startingNumber,
+								componentIds);
 						if (!nextAvailableId.equals(id) && !canBeReplaced) {
 							// component can not be created because the id is already used
 							// and the id can not be set in the configuration
@@ -1573,10 +1774,8 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 			if (canBeReplaced) {
 				// replace component with new id
 				final var component = orderedComponents.remove(i);
-				orderedComponents.add(i,
-						new EdgeConfig.Component(id, component.getAlias(), component.getFactoryId(),
-								component.getProperties().entrySet().stream()
-										.collect(JsonUtils.toJsonObject(Entry::getKey, Entry::getValue))));
+				orderedComponents.add(i, new ComponentDef(id, component.alias(), component.factoryId(),
+						component.properties(), Configuration.defaultConfig()));
 				newAppInstance.properties.addProperty(replacableId.key, id);
 			}
 		}
@@ -1591,7 +1790,13 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		return (AppManagerImpl) appManagerImpl;
 	}
 
-	private static ResourceBundle getTranslationBundle(Language language) {
+	/**
+	 * Gets the {@link ResourceBundle} based on the given {@link Language}.
+	 * 
+	 * @param language the {@link Language} of the translations
+	 * @return the {@link ResourceBundle}
+	 */
+	public static ResourceBundle getTranslationBundle(Language language) {
 		if (language == null) {
 			language = Language.DEFAULT;
 		}
@@ -1616,6 +1821,31 @@ public class AppManagerAppHelperImpl implements AppManagerAppHelper {
 		return Optional.ofNullable(this.temporaryApps) //
 				.map(TemporaryApps::unmodifiableApps) //
 				.orElse(null);
+	}
+
+	/**
+	 * Inserts a task into a existing list of tasks. The task gets inserted at a
+	 * position which suits their
+	 * {@link AggregateTask.AggregateTaskExecuteConstraints}.
+	 * 
+	 * @param tasks the existing task list
+	 * @param task  the task to insert
+	 */
+	public static void insert(List<AggregateTask<?>> tasks, AggregateTask<?> task) {
+		// TODO detect circular constraints
+		var insertIndex = tasks.size();
+
+		final var iterator = tasks.listIterator();
+		while (iterator.hasNext()) {
+			final var i = iterator.nextIndex();
+			final var t = iterator.next();
+			if (t.getExecuteConstraints().runAfter().stream() //
+					.anyMatch(e -> e.isAssignableFrom(task.getClass()))) {
+				insertIndex = i;
+			}
+		}
+
+		tasks.add(insertIndex, task);
 	}
 
 }

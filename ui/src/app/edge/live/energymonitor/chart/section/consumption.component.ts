@@ -1,59 +1,45 @@
-import { animate, state, style, transition, trigger } from '@angular/animations';
-import { Component, OnDestroy, OnInit } from '@angular/core';
-import { TranslateService } from '@ngx-translate/core';
-import { UnitvaluePipe } from 'src/app/shared/pipe/unitvalue/unitvalue.pipe';
-import { DefaultTypes } from '../../../../../shared/service/defaulttypes';
-import { Service, Utils } from '../../../../../shared/shared';
-import { AbstractSection, EnergyFlow, Ratio, SvgEnergyFlow, SvgSquare, SvgSquarePosition } from './abstractsection.component';
+// @ts-strict-ignore
+import { Component, OnDestroy, OnInit } from "@angular/core";
+import { TranslateService } from "@ngx-translate/core";
+import { Subscription } from "rxjs";
+import { UnitvaluePipe } from "src/app/shared/pipe/unitvalue/unitvalue.pipe";
+import { environment } from "src/environments";
+import { Service, Utils } from "../../../../../shared/shared";
+import { DefaultTypes } from "../../../../../shared/type/defaulttypes";
+import { AbstractSection, EnergyFlow, Ratio, SvgEnergyFlow, SvgSquare, SvgSquarePosition } from "./abstractsection.component";
+import { AnimationService } from "./animation.service";
 
 @Component({
-    selector: '[consumptionsection]',
-    templateUrl: './consumption.component.html',
-    animations: [
-        trigger('Consumption', [
-            state('show', style({
-                opacity: 0.1,
-                transform: 'translateX(0%)'
-            })),
-            state('hide', style({
-                opacity: 0.6,
-                transform: 'translateX(17%)'
-            })),
-            transition('show => hide', animate('650ms ease-out')),
-            transition('hide => show', animate('0ms ease-in'))
-        ])
-    ]
+    selector: "[consumptionsection]",
+    templateUrl: "./consumption.component.html",
+    styleUrls: ["../animation.scss"],
+    standalone: false,
 })
 export class ConsumptionSectionComponent extends AbstractSection implements OnInit, OnDestroy {
 
     private unitpipe: UnitvaluePipe;
-    private showAnimation: boolean = false;
-    private animationTrigger: boolean = false;
-    // animation variable to stop animation on destroy
-    private startAnimation = null;
+    private consumptionAnimationClass: string = "consumption-hide";
+    private subShow?: Subscription;
 
     constructor(
         unitpipe: UnitvaluePipe,
         translate: TranslateService,
-        service: Service
+        service: Service,
+        private animationService: AnimationService,
     ) {
-        super('General.consumption', "right", "#FDC507", translate, service, "Consumption");
+        super("GENERAL.CONSUMPTION", "right", "var(--ion-color-warning)", translate, service, "Consumption");
         this.unitpipe = unitpipe;
     }
 
     ngOnInit() {
         this.adjustFillRefbyBrowser();
+        this.subShow = this.animationService.toggleAnimation$.subscribe((show) => {
+            this.consumptionAnimationClass = show ? "consumption-hide" : "consumption-show";
+        });
     }
 
-    toggleAnimation() {
-        this.startAnimation = setInterval(() => {
-            this.showAnimation = !this.showAnimation;
-        }, this.animationSpeed);
-        this.animationTrigger = true;
-    }
-
-    get stateName() {
-        return this.showAnimation ? 'show' : 'hide';
+    ngOnDestroy() {
+        this.subShow?.unsubscribe();
     }
 
     protected getStartAngle(): number {
@@ -65,16 +51,13 @@ export class ConsumptionSectionComponent extends AbstractSection implements OnIn
     }
 
     protected getRatioType(): Ratio {
-        return 'Only Positive [0,1]';
+        return "Only Positive [0,1]";
     }
 
     protected _updateCurrentData(sum: DefaultTypes.Summary): void {
         let arrowIndicate: number;
         // only reacts to kW values (50 W => 0.1 kW rounded)
         if (sum.consumption.activePower > 49) {
-            if (!this.animationTrigger) {
-                this.toggleAnimation();
-            }
             arrowIndicate = Utils.divideSafely(sum.consumption.activePower, sum.system.totalPower);
         } else {
             arrowIndicate = 0;
@@ -86,19 +69,19 @@ export class ConsumptionSectionComponent extends AbstractSection implements OnIn
     }
 
     protected getSquarePosition(square: SvgSquare, innerRadius: number): SvgSquarePosition {
-        let x = innerRadius - 5 - square.length;
-        let y = (square.length / 2) * (-1);
+        const x = innerRadius - 5 - square.length;
+        const y = (square.length / 2) * (-1);
         return new SvgSquarePosition(x, y);
     }
     protected getImagePath(): string {
-        return "icon/consumption.svg";
+        return environment.icons.COMMON.CONSUMPTION;
     }
 
     protected getValueText(value: number): string {
         if (value == null || Number.isNaN(value)) {
             return "";
         }
-        return this.unitpipe.transform(value, 'kW');
+        return this.unitpipe.transform(value, "kW");
     }
 
     protected initEnergyFlow(radius: number): EnergyFlow {
@@ -111,15 +94,15 @@ export class ConsumptionSectionComponent extends AbstractSection implements OnIn
     }
 
     protected getSvgEnergyFlow(ratio: number, radius: number): SvgEnergyFlow {
-        let v = Math.abs(ratio);
-        let r = radius;
-        let p = {
+        const v = Math.abs(ratio);
+        const r = radius;
+        const p = {
             topLeft: { x: v, y: v * -1 },
             middleLeft: { x: 0, y: 0 },
             bottomLeft: { x: v, y: v },
             topRight: { x: r, y: v * -1 },
             bottomRight: { x: r, y: v },
-            middleRight: { x: r - v, y: 0 }
+            middleRight: { x: r - v, y: 0 },
         };
         if (ratio > 0) {
             // towards right
@@ -132,16 +115,16 @@ export class ConsumptionSectionComponent extends AbstractSection implements OnIn
     }
 
     protected getSvgAnimationEnergyFlow(ratio: number, radius: number): SvgEnergyFlow {
-        let v = Math.abs(ratio);
-        let r = radius;
-        let animationWidth = (r * -1) - v;
+        const v = Math.abs(ratio);
+        const r = radius;
+        const animationWidth = (r * -1) - v;
         let p = {
             topLeft: { x: v, y: v * -1 },
             middleLeft: { x: 0, y: 0 },
             bottomLeft: { x: v, y: v },
             topRight: { x: r, y: v * -1 },
             bottomRight: { x: r, y: v },
-            middleRight: { x: r - v, y: 0 }
+            middleRight: { x: r - v, y: 0 },
         };
         if (ratio > 0) {
             // towards right
@@ -155,7 +138,4 @@ export class ConsumptionSectionComponent extends AbstractSection implements OnIn
         return p;
     }
 
-    ngOnDestroy() {
-        clearInterval(this.startAnimation);
-    }
 }

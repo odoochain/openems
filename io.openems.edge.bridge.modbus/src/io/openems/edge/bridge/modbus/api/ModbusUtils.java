@@ -1,166 +1,275 @@
 package io.openems.edge.bridge.modbus.api;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.ArrayList;
+import static io.openems.edge.bridge.modbus.api.task.Task.ExecuteState.NO_OP;
+import static java.util.Collections.emptyList;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import com.ghgande.j2mod.modbus.procimg.InputRegister;
 import com.ghgande.j2mod.modbus.procimg.Register;
 
-import io.openems.common.exceptions.OpenemsException;
+import io.openems.common.function.Disposable;
+import io.openems.common.utils.FunctionUtils;
+import io.openems.edge.bridge.modbus.api.element.AbstractModbusElement;
 import io.openems.edge.bridge.modbus.api.element.ModbusRegisterElement;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
+import io.openems.edge.bridge.modbus.api.task.FC4ReadInputRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.Task;
+import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
+import io.openems.edge.common.channel.Channel;
 import io.openems.edge.common.taskmanager.Priority;
 
 public class ModbusUtils {
 
 	/**
+	 * Enum representing Modbus function codes used to select the appropriate task.
+	 * 
+	 * <p>
+	 * This enum defines the available function codes for use in modbus tasks.
+	 */
+	public static enum FunctionCode {
+		FC3, FC4;
+	}
+
+	/**
+	 * Predefined `retryPredicate` that triggers a retry whenever `value` is null,
+	 * i.e. on any error.
+	 * 
+	 * @param <T>          the Type of the element
+	 * @param executeState the Task {@link ExecuteState}
+	 * @param value        the value
+	 * @return true for retry
+	 */
+	public static <T> boolean retryOnNull(ExecuteState executeState, T value) {
+		return value == null;
+	}
+
+	/**
+	 * Predefined `retryPredicate` that never retries.
+	 * 
+	 * @param <T>          the Type of the element
+	 * @param executeState the Task {@link ExecuteState}
+	 * @param value        the value
+	 * @return always false
+	 */
+	public static <T> boolean doNotRetry(ExecuteState executeState, T value) {
+		return false;
+	}
+
+	/**
+	 * Predefined `retryPredicate` that aborts after nth errors in a row occurred.
+	 *
+	 * @param <T>            the Type of the element
+	 * @param numberOfErrors the number of errors until the task is removed
+	 * @param onValue        callback to receive the value
+	 * @return a predicate which returns true until the nth error in a row occurred
+	 */
+	public static <T> Supplier<BiPredicate<ExecuteState, T>> abortAfterNthErrors(//
+			int numberOfErrors, //
+			Consumer<T> onValue //
+	) {
+		return () -> {
+			final var counter = new AtomicInteger(0);
+			return (executeState, t) -> {
+				onValue.accept(t);
+
+				if (executeState instanceof ExecuteState.Error) {
+					return counter.incrementAndGet() < numberOfErrors;
+				}
+
+				counter.set(0);
+				return true;
+			};
+		};
+	}
+
+	/**
+	 * Predefined `retryPredicate` that aborts after nth errors in a row occurred.
+	 *
+	 * @param <T>            the Type of the element
+	 * @param numberOfErrors the number of errors until the task is removed
+	 * @return a predicate which returns true until the nth error in a row occurred
+	 */
+	public static <T> Supplier<BiPredicate<ExecuteState, T>> abortAfterNthErrors(int numberOfErrors) {
+		return abortAfterNthErrors(numberOfErrors, FunctionUtils::doNothing);
+	}
+
+	/**
+	 * Predefined `restartFunction` that restart when the value of the channel
+	 * changes.
+	 * 
+	 * @param channel the channel to subscribe to
+	 * @return a {@link Function} which triggers a restart when the channel value
+	 *         changes
+	 */
+	public static Function<Runnable, Disposable> restartAfterChannelChange(Channel<?> channel) {
+		return restart -> {
+			final var onChangeListener = channel.onChange((value, value2) -> restart.run());
+
+			return () -> channel.removeOnChangeCallback(onChangeListener);
+		};
+	}
+
+	/**
 	 * Reads given Element once from Modbus.
 	 *
-	 * @param <T>             the Type of the element
-	 * @param modbusProtocol  the {@link ModbusProtocol}, that is linked with a
-	 *                        {@link BridgeModbus}
-	 * @param element         the {@link ModbusRegisterElement}
-	 * @param tryAgainOnError if true, tries to read till it receives a value; if
-	 *                        false, stops after first try and possibly return null
+	 * @param <T>            the Type of the element
+	 * @param functionCode   the {@link FunctionCode}
+	 * @param modbusProtocol the {@link ModbusProtocol}, that is linked with a
+	 *                       {@link BridgeModbus}
+	 * @param retryPredicate yield true to retry reading values; false otherwise.
+	 *                       Parameters are the {@link ExecuteState} of the entire
+	 *                       task and the individual element value
+	 * @param element        the {@link ModbusRegisterElement}
 	 * @return a future value, e.g. a Integer or null (if tryAgainOnError is false)
-	 * @throws OpenemsException on error with the {@link ModbusProtocol} object
 	 */
-	public static <T> CompletableFuture<T> readELementOnce(ModbusProtocol modbusProtocol,
-			ModbusRegisterElement<?, T> element, boolean tryAgainOnError) throws OpenemsException {
-		// Prepare result
-		final var result = new CompletableFuture<T>();
-
-		// Activate task
-		final Task task = new FC3ReadRegistersTask(element.startAddress, Priority.HIGH, element);
-		modbusProtocol.addTask(task);
-
-		// Register listener for element
-		element.onUpdateCallback(value -> {
-			if (value == null) {
-				if (tryAgainOnError) {
-					return;
-				}
-				result.complete(null);
-			}
-			// do not try again
-			modbusProtocol.removeTask(task);
-			result.complete(value);
-		});
-
-		return result;
+	@SuppressWarnings("unchecked")
+	public static <T> CompletableFuture<T> readElementOnce(FunctionCode functionCode, ModbusProtocol modbusProtocol,
+			BiPredicate<ExecuteState, T> retryPredicate, ModbusRegisterElement<?, T> element) {
+		return readElementsOnce(functionCode, modbusProtocol, retryPredicate, //
+				new ModbusRegisterElement[] { element }) //
+				.thenApply(rsr -> ((ReadElementsResult<T>) rsr).values().get(0));
 	}
 
 	/**
 	 * Reads given Elements once from Modbus.
 	 *
-	 * @param <T>             the Type of the elements
-	 * @param modbusProtocol  the {@link ModbusProtocol}, that is linked with a
-	 *                        {@link BridgeModbus}
-	 * @param elements        the {@link ModbusRegisterElement}s
-	 * @param tryAgainOnError if true, tries to read till it receives a value on
-	 *                        first register; if false, stops after first try and
-	 *                        possibly return null
-	 * @return a future array of values, e.g. Integer[] or null (if tryAgainOnError
-	 *         is false). If an array is returned, it is guaranteed to have the same
-	 *         length as `elements`
-	 * @throws OpenemsException on error with the {@link ModbusProtocol} object
+	 * @param <T>            the Type of the elements
+	 * @param functionCode   the {@link FunctionCode}
+	 * @param modbusProtocol the {@link ModbusProtocol}, that is linked with a
+	 *                       {@link BridgeModbus}
+	 * @param retryPredicate yield true to retry reading values. Parameters are the
+	 *                       Task success state and individual element value
+	 * @param elements       the {@link ModbusRegisterElement}s
+	 * @return a future array of values, e.g. Integer[] or null. If an array is
+	 *         returned, it is guaranteed to have the same length as `elements`
 	 */
-	public static <T> CompletableFuture<List<T>> readELementsOnce(ModbusProtocol modbusProtocol,
-			ModbusRegisterElement<?, T>[] elements, boolean tryAgainOnError) throws OpenemsException {
+	@SafeVarargs
+	public static <T> CompletableFuture<ReadElementsResult<T>> readElementsOnce(FunctionCode functionCode,
+			ModbusProtocol modbusProtocol, BiPredicate<ExecuteState, T> retryPredicate,
+			ModbusRegisterElement<?, T>... elements) {
 		if (elements.length == 0) {
-			return CompletableFuture.completedFuture(Collections.emptyList());
+			return completedFuture(new ReadElementsResult<>(NO_OP, emptyList()));
 		}
-
-		// Prepare result
-		final var result = new CompletableFuture<List<T>>();
-
-		// Activate task
-		final Task task = new FC3ReadRegistersTask(elements[0].startAddress, Priority.HIGH, elements);
-		modbusProtocol.addTask(task);
 
 		// Register listener for each element
-		final var subResults = new ArrayList<CompletableFuture<T>>();
-		{
-			var subResult = new CompletableFuture<T>();
-			subResults.add(subResult);
-			elements[0].onUpdateCallback(value -> {
-				if (value == null) {
-					if (tryAgainOnError) {
-						// try again
-						return;
-					} else {
-						result.complete(null);
-					}
-				}
+		final var executeState = new AtomicReference<ExecuteState>(NO_OP);
 
-				// do not try again
-				modbusProtocol.removeTask(task);
-				subResult.complete(value);
-			});
-		}
+		// Activate task based on functionCode
+		Task task = switch (functionCode) {
+		case FC4 -> new FC4ReadInputRegistersTask(executeState::set, elements[0].startAddress, Priority.HIGH, elements);
+		case FC3 -> new FC3ReadRegistersTask(executeState::set, elements[0].startAddress, Priority.HIGH, elements);
+		};
+		modbusProtocol.addTask(task);
 
-		for (var i = 1; i < elements.length; i++) {
+		@SuppressWarnings("unchecked")
+		final var subResults = (CompletableFuture<T>[]) new CompletableFuture<?>[elements.length];
+
+		for (var i = 0; i < elements.length; i++) {
 			var subResult = new CompletableFuture<T>();
-			subResults.add(subResult);
+			subResults[i] = subResult;
 			elements[i].onUpdateCallback(value -> {
-				modbusProtocol.removeTask(task);
-				subResult.complete(value);
+				if (retryPredicate.test(executeState.get(), value)) {
+					// try again
+					return;
+				} else {
+					// do not try again
+					subResult.complete(value);
+				}
 			});
 		}
 
-		CompletableFuture //
-				.allOf(subResults.toArray(new CompletableFuture[subResults.size()])) //
-				.thenAccept(ignored -> result.complete(//
-						subResults.stream() //
-								.map(CompletableFuture::join) //
-								.toList()));
+		return CompletableFuture //
+				.allOf(subResults) //
+				.thenApply(ignore -> {
+					// remove task
+					modbusProtocol.removeTask(task);
 
-		return result;
+					// return combined future
+					return new ReadElementsResult<>(executeState.get(), //
+							Stream.of(subResults) //
+									.map(CompletableFuture::join) //
+									.toList());
+				});
 	}
 
 	/**
-	 * Converts upper/lower bytes to Short.
+	 * Reads given Elements from Modbus until the predicate returns false.
 	 *
-	 * @param value      the int value
-	 * @param upperBytes 1 = upper two bytes, 0 = lower two bytes
-	 * @return the Short
+	 * @param modbusProtocol           the {@link ModbusProtocol}, that is linked
+	 *                                 with a {@link BridgeModbus}
+	 * @param continuePredicateFactory yield true to continue reading values.
+	 *                                 Parameters are the Task success state and
+	 *                                 individual element value
+	 * @param restartFunction          a function with a {@link Runnable} to restart
+	 *                                 the reading process
+	 * @param taskFactory              the factory to create the {@link Task}
+	 * @return a {@link Disposable} to clean everything up
 	 */
-	public static Short convert(int value, int upperBytes) {
-		var b = ByteBuffer.allocate(4);
-		b.order(ByteOrder.LITTLE_ENDIAN);
-		b.putInt(value);
+	public static Disposable readElementsUntil(//
+			ModbusProtocol modbusProtocol, //
+			Supplier<BiPredicate<ExecuteState, Object>> continuePredicateFactory, //
+			Function<Runnable, Disposable> restartFunction, //
+			Function<Consumer<ExecuteState>, Task> taskFactory //
+	) {
+		final var executeState = new AtomicReference<ExecuteState>(NO_OP);
+		final var task = taskFactory.apply(executeState::set);
 
-		var byte0 = b.get(upperBytes * 2);
-		var byte1 = b.get(upperBytes * 2 + 1);
+		if (task.getElements().length == 0) {
+			return FunctionUtils::doNothing;
+		}
 
-		var shortBuf = ByteBuffer.allocate(2);
-		shortBuf.order(ByteOrder.LITTLE_ENDIAN);
-		shortBuf.put(0, byte0);
-		shortBuf.put(1, byte1);
+		final var predicate = new AtomicReference<>(continuePredicateFactory.get());
+		final var finished = new AtomicBoolean(false);
 
-		return shortBuf.getShort();
+		for (var element : task.getElements()) {
+			switch (element) {
+			case AbstractModbusElement<?, ?, ?> e -> e.onUpdateCallback(value -> {
+				final var p = predicate.get();
+				if (p.test(executeState.get(), value)) {
+					return;
+				}
+				synchronized (finished) {
+					if (predicate.get() != p) {
+						return;
+					}
+					finished.set(true);
+					modbusProtocol.removeTask(task);
+				}
+			});
+			}
+		}
+
+		modbusProtocol.addTask(task);
+
+		final Runnable restart = () -> {
+			synchronized (finished) {
+				predicate.set(continuePredicateFactory.get());
+				if (finished.get()) {
+					finished.set(false);
+					modbusProtocol.addTask(task);
+				}
+			}
+		};
+
+		restart.run();
+
+		return restartFunction.apply(restart);
 	}
 
-	/**
-	 * Converts a byte array to a String in the form "00C1 00B2".
-	 * 
-	 * @param data byte array
-	 * @return string
-	 */
-	public static String byteArrayToHexString(byte[] data) {
-		return IntStream.range(0, data.length / 2) //
-				.mapToObj(i -> String.format("%2s%2s", //
-						Integer.toHexString(data[i]), Integer.toHexString(data[i + 1])).replace(' ', '0'))
-				.collect(Collectors.joining(" "));
+	public static record ReadElementsResult<T>(ExecuteState executeState, List<T> values) {
 	}
 
 	/**

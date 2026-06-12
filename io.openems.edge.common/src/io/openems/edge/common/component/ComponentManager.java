@@ -2,35 +2,42 @@ package io.openems.edge.common.component;
 
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 
 import org.osgi.framework.BundleContext;
 
 import io.openems.common.channel.Level;
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
+import io.openems.common.jsonrpc.request.CreateComponentConfigRequest;
+import io.openems.common.jsonrpc.request.DeleteComponentConfigRequest;
+import io.openems.common.jsonrpc.request.UpdateComponentConfigRequest;
+import io.openems.common.jsonrpc.type.CreateComponentConfig;
+import io.openems.common.jsonrpc.type.DeleteComponentConfig;
+import io.openems.common.jsonrpc.type.UpdateComponentConfig;
 import io.openems.common.types.ChannelAddress;
 import io.openems.common.types.EdgeConfig;
 import io.openems.edge.common.channel.Channel;
 import io.openems.edge.common.channel.Doc;
 import io.openems.edge.common.channel.StateChannel;
 import io.openems.edge.common.channel.value.Value;
-import io.openems.edge.common.jsonapi.JsonApi;
+import io.openems.edge.common.user.User;
 
 /**
  * A Service that provides access to OpenEMS-Components.
  */
-public interface ComponentManager extends OpenemsComponent, JsonApi, ClockProvider {
+public interface ComponentManager extends OpenemsComponent, ClockProvider {
 
 	public static final String SINGLETON_SERVICE_PID = "Core.ComponentManager";
 	public static final String SINGLETON_COMPONENT_ID = "_componentManager";
 
 	public enum ChannelId implements io.openems.edge.common.channel.ChannelId {
-		CONFIG_NOT_ACTIVATED(Doc.of(Level.FAULT) //
+		CONFIG_NOT_ACTIVATED(Doc.of(Level.FAULT)//
 				.text("A configured OpenEMS Component was not activated")), //
-		DUPLICATED_COMPONENT_ID(Doc.of(Level.FAULT) //
+		DUPLICATED_COMPONENT_ID(Doc.of(Level.FAULT)//
 				.text("Configuration has duplicated Component-IDs")), //
-		WAS_OUT_OF_MEMORY(Doc.of(Level.INFO) //
+		WAS_OUT_OF_MEMORY(Doc.of(Level.INFO)//
 				.text("OutOfMemory had happened. Found heap dump files.")),
-		DEFAULT_CONFIGURATION_FAILED(Doc.of(Level.FAULT) //
+		DEFAULT_CONFIGURATION_FAILED(Doc.of(Level.FAULT)//
 				.text("Applying the default configuration failed.")),;
 
 		private final Doc doc;
@@ -171,6 +178,20 @@ public interface ComponentManager extends OpenemsComponent, JsonApi, ClockProvid
 	public Clock getClock();
 
 	/**
+	 * Gets the component properties by its component id.
+	 * 
+	 * @param componentId the id of the component
+	 * @return the properties or a empty map if none found
+	 * @implNote this method is preferred to use when only the properties of an
+	 *           component are of interest. Because of OSGi delivering the component
+	 *           updates asynchronously and if a component update happens the config
+	 *           update may not reflect immediately to the config of the
+	 *           implementation of that component but this method uses the direct
+	 *           configuration in the service registration.
+	 */
+	public Map<String, Object> getComponentProperties(String componentId);
+
+	/**
 	 * Gets all enabled OpenEMS-Components.
 	 * 
 	 * <p>
@@ -273,5 +294,35 @@ public interface ComponentManager extends OpenemsComponent, JsonApi, ClockProvid
 	 * @return the {@link EdgeConfig} object
 	 */
 	public EdgeConfig getEdgeConfig();
+
+	/**
+	 * Handles a {@link CreateComponentConfigRequest}.
+	 * 
+	 * @param user    the user
+	 * @param request the {@link CreateComponentConfigRequest}
+	 * @throws OpenemsNamedException on error
+	 */
+	public void handleCreateComponentConfigRequest(User user, CreateComponentConfig.Request request)
+			throws OpenemsNamedException;
+
+	/**
+	 * Handles a {@link UpdateComponentConfigRequest}.
+	 * 
+	 * @param user    the user
+	 * @param request the {@link UpdateComponentConfigRequest}
+	 * @throws OpenemsNamedException on error
+	 */
+	public void handleUpdateComponentConfigRequest(User user, UpdateComponentConfig.Request request)
+			throws OpenemsNamedException;
+
+	/**
+	 * Handles a {@link DeleteComponentConfigRequest}.
+	 * 
+	 * @param user    the user
+	 * @param request the {@link DeleteComponentConfigRequest}
+	 * @throws OpenemsNamedException on error
+	 */
+	public void handleDeleteComponentConfigRequest(User user, DeleteComponentConfig.Request request)
+			throws OpenemsNamedException;
 
 }

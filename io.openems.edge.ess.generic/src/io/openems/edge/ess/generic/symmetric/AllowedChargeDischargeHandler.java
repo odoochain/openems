@@ -1,8 +1,12 @@
 package io.openems.edge.ess.generic.symmetric;
 
+import static io.openems.edge.common.channel.ChannelUtils.setValue;
+
 import io.openems.edge.battery.api.Battery;
+import io.openems.edge.batteryinverter.api.SymmetricBatteryInverter;
 import io.openems.edge.common.component.ClockProvider;
 import io.openems.edge.common.type.TypeUtils;
+import io.openems.edge.ess.api.ManagedSymmetricEss;
 import io.openems.edge.ess.generic.common.AbstractAllowedChargeDischargeHandler;
 
 public class AllowedChargeDischargeHandler extends AbstractAllowedChargeDischargeHandler<EssGenericManagedSymmetric> {
@@ -12,8 +16,8 @@ public class AllowedChargeDischargeHandler extends AbstractAllowedChargeDischarg
 	}
 
 	@Override
-	public void accept(ClockProvider clockProvider, Battery battery) {
-		this.calculateAllowedChargeDischargePower(clockProvider, battery);
+	public void accept(ClockProvider clockProvider, Battery battery, SymmetricBatteryInverter inverter) {
+		this.calculateAllowedChargeDischargePower(clockProvider, battery, inverter);
 
 		// Battery limits
 		var batteryAllowedChargePower = Math.round(this.lastBatteryAllowedChargePower);
@@ -27,8 +31,10 @@ public class AllowedChargeDischargeHandler extends AbstractAllowedChargeDischarg
 				0);
 
 		// Apply AllowedChargePower and AllowedDischargePower
-		this.parent._setAllowedChargePower(batteryAllowedChargePower * -1 /* invert charge power */);
-		this.parent._setAllowedDischargePower(batteryAllowedDischargePower + pvProduction);
+		setValue(this.parent, ManagedSymmetricEss.ChannelId.ALLOWED_CHARGE_POWER,
+				batteryAllowedChargePower * -1 /* invert charge power */);
+		setValue(this.parent, ManagedSymmetricEss.ChannelId.ALLOWED_DISCHARGE_POWER,
+				batteryAllowedDischargePower + pvProduction);
 	}
 
 }

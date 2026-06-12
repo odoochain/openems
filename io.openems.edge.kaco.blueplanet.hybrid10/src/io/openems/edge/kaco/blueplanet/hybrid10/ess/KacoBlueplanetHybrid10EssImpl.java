@@ -1,5 +1,16 @@
 package io.openems.edge.kaco.blueplanet.hybrid10.ess;
 
+import static io.openems.edge.common.channel.ChannelUtils.setValue;
+import static io.openems.edge.common.type.Phase.SingleOrAllPhase.ALL;
+import static io.openems.edge.ess.power.api.Pwr.ACTIVE;
+import static io.openems.edge.ess.power.api.Pwr.REACTIVE;
+import static io.openems.edge.ess.power.api.Relationship.EQUALS;
+import static io.openems.edge.ess.power.api.Relationship.GREATER_OR_EQUALS;
+import static io.openems.edge.ess.power.api.Relationship.LESS_OR_EQUALS;
+import static org.osgi.service.component.annotations.ReferenceCardinality.MANDATORY;
+import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
+import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
+
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -13,9 +24,6 @@ import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.ConfigurationPolicy;
 import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.component.annotations.Reference;
-import org.osgi.service.component.annotations.ReferenceCardinality;
-import org.osgi.service.component.annotations.ReferencePolicy;
-import org.osgi.service.component.annotations.ReferencePolicyOption;
 import org.osgi.service.event.Event;
 import org.osgi.service.event.EventHandler;
 import org.osgi.service.event.propertytypes.EventTopics;
@@ -38,10 +46,7 @@ import io.openems.edge.ess.api.HybridEss;
 import io.openems.edge.ess.api.ManagedSymmetricEss;
 import io.openems.edge.ess.api.SymmetricEss;
 import io.openems.edge.ess.power.api.Constraint;
-import io.openems.edge.ess.power.api.Phase;
 import io.openems.edge.ess.power.api.Power;
-import io.openems.edge.ess.power.api.Pwr;
-import io.openems.edge.ess.power.api.Relationship;
 import io.openems.edge.kaco.blueplanet.hybrid10.ErrorChannelId;
 import io.openems.edge.kaco.blueplanet.hybrid10.core.KacoBlueplanetHybrid10Core;
 import io.openems.edge.timedata.api.Timedata;
@@ -72,7 +77,7 @@ public class KacoBlueplanetHybrid10EssImpl extends AbstractOpenemsComponent impl
 	private final CalculateEnergyFromPower calculateDcDischargeEnergy = new CalculateEnergyFromPower(this,
 			HybridEss.ChannelId.DC_DISCHARGE_ENERGY);
 
-	@Reference(policy = ReferencePolicy.STATIC, policyOption = ReferencePolicyOption.GREEDY, cardinality = ReferenceCardinality.MANDATORY)
+	@Reference(policy = STATIC, policyOption = GREEDY, cardinality = MANDATORY)
 	private KacoBlueplanetHybrid10Core core;
 
 	@Reference
@@ -148,7 +153,7 @@ public class KacoBlueplanetHybrid10EssImpl extends AbstractOpenemsComponent impl
 		Float riso = null;
 		Integer inverterStatus = null;
 		Integer batteryStatus = null;
-		PowerManagementConfiguration powerManagementConfiguration = PowerManagementConfiguration.UNDEFINED;
+		var powerManagementConfiguration = PowerManagementConfiguration.UNDEFINED;
 
 		var bpData = this.core.getBpData();
 		this._setCommunicationFailed(bpData == null);
@@ -201,18 +206,16 @@ public class KacoBlueplanetHybrid10EssImpl extends AbstractOpenemsComponent impl
 		this._setActivePower(activePower);
 		this._setDcDischargePower(dcDischargePower);
 		this._setReactivePower(reactivePower);
-		this._setGridMode(gridMode);
+		setValue(this, SymmetricEss.ChannelId.GRID_MODE, gridMode);
 
-		if (soc == null || soc >= 99) {
-			this._setAllowedChargePower(0);
-		} else {
-			this._setAllowedChargePower(this.config.capacity() * -1);
-		}
-		if (soc == null || soc <= 0) {
-			this._setAllowedDischargePower(0);
-		} else {
-			this._setAllowedDischargePower(this.config.capacity());
-		}
+		setValue(this, ManagedSymmetricEss.ChannelId.ALLOWED_CHARGE_POWER, //
+				soc == null || soc >= 99 //
+						? 0 //
+						: this.config.capacity() * -1);
+		setValue(this, ManagedSymmetricEss.ChannelId.ALLOWED_DISCHARGE_POWER, //
+				soc == null || soc <= 0 //
+						? 0 //
+						: this.config.capacity());
 
 		this.channel(KacoBlueplanetHybrid10Ess.ChannelId.BMS_VOLTAGE).setNextValue(bmsVoltage);
 		this.channel(KacoBlueplanetHybrid10Ess.ChannelId.RISO).setNextValue(riso);
@@ -355,19 +358,20 @@ public class KacoBlueplanetHybrid10EssImpl extends AbstractOpenemsComponent impl
 	public Constraint[] getStaticConstraints() throws OpenemsException {
 		// Read-Only-Mode
 		if (this.config.readOnly()) {
-			return new Constraint[] {
-					this.createPowerConstraint("Read-Only-Mode", Phase.ALL, Pwr.ACTIVE, Relationship.EQUALS, 0),
-					this.createPowerConstraint("Read-Only-Mode", Phase.ALL, Pwr.REACTIVE, Relationship.EQUALS, 0) };
+			return new Constraint[] { //
+					this.createPowerConstraint("Read-Only-Mode", ALL, ACTIVE, EQUALS, 0), //
+					this.createPowerConstraint("Read-Only-Mode", ALL, REACTIVE, EQUALS, 0) //
+			};
 		}
 		// Apply Power-Ramp for version > 5
 		if (this.core.getVersionCom().orElse(0F) > 5F) {
-			float maxDelta = MAX_POWER_RAMP * this.cycle.getCycleTime() / 1000;
-			int activePower = this.getActivePower().orElse(0);
+			var maxDelta = Math.round(MAX_POWER_RAMP * this.cycle.getCycleTime() / 1000);
+			var activePower = this.getActivePower().orElse(0);
 			return new Constraint[] {
-					this.createPowerConstraint(MAX_POWER_RAMP + "W/sec Ramp", Phase.ALL, Pwr.ACTIVE,
-							Relationship.LESS_OR_EQUALS, activePower + maxDelta),
-					this.createPowerConstraint(MAX_POWER_RAMP + "W/sec Ramp", Phase.ALL, Pwr.ACTIVE,
-							Relationship.GREATER_OR_EQUALS, activePower - maxDelta) };
+					this.createPowerConstraint(MAX_POWER_RAMP + "W/sec Ramp", ALL, ACTIVE, LESS_OR_EQUALS,
+							activePower + maxDelta),
+					this.createPowerConstraint(MAX_POWER_RAMP + "W/sec Ramp", ALL, ACTIVE, GREATER_OR_EQUALS,
+							activePower - maxDelta) };
 		}
 		return Power.NO_CONSTRAINTS;
 	}

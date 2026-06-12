@@ -1,8 +1,15 @@
 package io.openems.edge.core.appmanager;
 
+import java.util.AbstractMap;
+import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.google.gson.JsonObject;
 
@@ -13,24 +20,101 @@ import io.openems.common.session.Language;
 public interface AppManagerUtil {
 
 	/**
-	 * Gets the {@link OpenemsApp} for the given appId.
-	 *
-	 * @param appId the appId of the {@link OpenemsApp}
-	 * @return the {@link OpenemsApp}
-	 * @throws NoSuchElementException if there is no {@link OpenemsApp} with the
-	 *                                given appId
+	 * Gets a {@link List} of the current installed {@link OpenemsAppInstance}.
+	 * 
+	 * @return the list of installed apps
 	 */
-	public OpenemsApp getAppById(String appId) throws NoSuchElementException;
+	public List<OpenemsAppInstance> getInstantiatedApps();
 
 	/**
-	 * Gets the {@link OpenemsAppInstance} for the given instanceId.
-	 *
-	 * @param instanceId the instanceId of the {@link OpenemsAppInstance}
-	 * @return the {@link OpenemsAppInstance}
-	 * @throws NoSuchElementException if there is not {@link OpenemsAppInstance}
-	 *                                with the given instanceId
+	 * Gets a {@link List} of the current installed {@link OpenemsAppInstance} which
+	 * match the given appId.
+	 * 
+	 * @param appId the appId which should match with
+	 *              {@link OpenemsAppInstance#appId}
+	 * @return a {@link List} of {@link OpenemsAppInstance}
 	 */
-	public OpenemsAppInstance getInstanceById(UUID instanceId) throws NoSuchElementException;
+	public default List<OpenemsAppInstance> getInstantiatedAppsOfApp(String appId) {
+		Objects.requireNonNull(appId);
+		return this.getInstantiatedApps().stream() //
+				.filter(instance -> appId.equals(instance.appId)) //
+				.toList();
+	}
+
+	/**
+	 * Gets a {@link List} of the current installed {@link OpenemsAppInstance} which
+	 * match the given appIds.
+	 * 
+	 * @param appIds the appIds which should match with
+	 *               {@link OpenemsAppInstance#appId}
+	 * @return a {@link List} of {@link OpenemsAppInstance}
+	 */
+	public default List<OpenemsAppInstance> getInstantiatedAppsOf(String... appIds) {
+		return this.getInstantiatedApps().stream() //
+				.filter(instance -> Stream.of(appIds) //
+						.anyMatch(appId -> appId.equals(instance.appId))) //
+				.toList();
+	}
+
+	/**
+	 * Gets the installed apps which matches at least one of the provided
+	 * {@link OpenemsAppCategory OpenemsAppCategories}.
+	 * 
+	 * @param categories the {@link OpenemsAppCategory} to be contained by the app
+	 * @return the found {@link OpenemsAppInstance OpenemsAppInstances}
+	 */
+	public List<OpenemsAppInstance> getInstantiatedAppsByCategories(OpenemsAppCategory... categories);
+
+	/**
+	 * Gets the first found installed app which matches at least one of the provided
+	 * {@link OpenemsAppCategory OpenemsAppCategories}.
+	 * 
+	 * @param categories the {@link OpenemsAppCategory} to be contained by the app
+	 * @return the found {@link OpenemsAppInstance}; or null if non found
+	 */
+	public default OpenemsAppInstance getFirstInstantiatedAppByCategories(OpenemsAppCategory... categories) {
+		final var instances = this.getInstantiatedAppsByCategories(categories);
+		return instances.isEmpty() ? null : instances.get(0);
+	}
+
+	/**
+	 * Finds the {@link OpenemsApp} with the given id.
+	 * 
+	 * @param id the {@link OpenemsApp#getAppId()} of the app.
+	 * @return a {@link Optional} of the app
+	 */
+	public Optional<OpenemsApp> findAppById(String id);
+
+	/**
+	 * Finds the {@link OpenemsApp} with the given id.
+	 * 
+	 * @param id the {@link OpenemsApp#getAppId()} of the app.
+	 * @return the app
+	 * @throws OpenemsNamedException if the app was not found
+	 */
+	public default OpenemsApp findAppByIdOrError(String id) throws OpenemsNamedException {
+		return this.findAppById(id).orElseThrow(() -> new OpenemsException("Unable to find app with id '" + id + "'"));
+	}
+
+	/**
+	 * Finds the {@link OpenemsAppInstance} with the given {@link UUID}.
+	 *
+	 * @param id the id of the instance
+	 * @return a {@link Optional} of the instance
+	 */
+	public Optional<OpenemsAppInstance> findInstanceById(UUID id);
+
+	/**
+	 * Finds the {@link OpenemsAppInstance} with the given {@link UUID}.
+	 * 
+	 * @param id the {@link UUID} of the instance
+	 * @return the instance
+	 * @throws OpenemsNamedException if not found
+	 */
+	public default OpenemsAppInstance findInstanceByIdOrError(UUID id) throws OpenemsNamedException {
+		return this.findInstanceById(id)
+				.orElseThrow(() -> new OpenemsException("Unable to find instance with id '" + id + "'"));
+	}
 
 	/**
 	 * Gets the {@link AppConfiguration} with the given parameter.
@@ -59,7 +143,7 @@ public interface AppManagerUtil {
 	 */
 	public default AppConfiguration getAppConfiguration(ConfigurationTarget target, String appId, String alias,
 			JsonObject properties, Language language) throws OpenemsNamedException {
-		return this.getAppConfiguration(target, this.getAppById(appId), alias, properties, language);
+		return this.getAppConfiguration(target, this.findAppByIdOrError(appId), alias, properties, language);
 	}
 
 	/**
@@ -88,7 +172,7 @@ public interface AppManagerUtil {
 	 */
 	public default AppConfiguration getAppConfiguration(ConfigurationTarget target, OpenemsAppInstance instance,
 			Language language) throws OpenemsNamedException {
-		return this.getAppConfiguration(target, this.getAppById(instance.appId), instance, language);
+		return this.getAppConfiguration(target, this.findAppByIdOrError(instance.appId), instance, language);
 	}
 
 	/**
@@ -99,5 +183,76 @@ public interface AppManagerUtil {
 	 * @return the referencing instances
 	 */
 	public List<OpenemsAppInstance> getAppsWithDependencyTo(OpenemsAppInstance instance);
+
+	/**
+	 * Gets an {@link Iterable} that loops through every instance and its
+	 * configuration.
+	 *
+	 * @param instances the instances
+	 * @param filter    the filter that gets applied to the instances
+	 * @return the {@link Iterable}
+	 */
+	public default Iterable<Map.Entry<OpenemsAppInstance, AppConfiguration>> appConfigs(//
+			List<OpenemsAppInstance> instances, //
+			Predicate<? super OpenemsAppInstance> filter //
+	) {
+		return () -> this.appConfigIterator(instances, filter);
+	}
+
+	/**
+	 * Gets an {@link Iterator} that loops through every instance and its
+	 * configuration.
+	 *
+	 * @param instances the instances
+	 * @param filter    the filter that gets applied to the instances
+	 * @return the {@link Iterator}
+	 */
+	private Iterator<Map.Entry<OpenemsAppInstance, AppConfiguration>> appConfigIterator(//
+			List<OpenemsAppInstance> instances, //
+			Predicate<? super OpenemsAppInstance> filter //
+	) {
+		final var actualInstances = instances.stream() //
+				.filter(i -> filter == null || filter.test(i)) //
+				.collect(Collectors.toList());
+		return new Iterator<>() {
+
+			private final Iterator<OpenemsAppInstance> instanceIterator = actualInstances.iterator();
+
+			private OpenemsAppInstance nextInstance = null;
+			private AppConfiguration nextConfiguration = null;
+
+			@Override
+			public Map.Entry<OpenemsAppInstance, AppConfiguration> next() {
+				var returnValue = new AbstractMap.SimpleEntry<>(this.nextInstance, this.nextConfiguration);
+				this.nextInstance = null;
+				this.nextConfiguration = null;
+				return returnValue;
+			}
+
+			@Override
+			public boolean hasNext() {
+				// value not obtained
+				if (this.nextConfiguration != null) {
+					return true;
+				}
+				while (this.instanceIterator.hasNext() && this.nextConfiguration == null) {
+					this.nextInstance = this.instanceIterator.next();
+
+					if (this.nextInstance.properties == null) {
+						continue;
+					}
+
+					try {
+						this.nextConfiguration = AppManagerUtil.this.getAppConfiguration(ConfigurationTarget.VALIDATE,
+								this.nextInstance, null);
+					} catch (OpenemsNamedException e) {
+						// move to the next app
+					}
+				}
+
+				return this.nextConfiguration != null;
+			}
+		};
+	}
 
 }

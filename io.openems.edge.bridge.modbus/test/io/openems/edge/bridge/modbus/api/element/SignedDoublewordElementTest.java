@@ -3,10 +3,10 @@ package io.openems.edge.bridge.modbus.api.element;
 import static io.openems.common.types.OpenemsType.LONG;
 import static io.openems.edge.bridge.modbus.api.element.WordOrder.LSWMSW;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import com.ghgande.j2mod.modbus.procimg.Register;
 import com.ghgande.j2mod.modbus.procimg.SimpleRegister;
@@ -37,7 +37,6 @@ public class SignedDoublewordElementTest {
 				new SimpleRegister((byte) 0xAB, (byte) 0xCD), //
 				new SimpleRegister((byte) 0x12, (byte) 0x34) //
 		});
-		System.out.println(sut.channel.getNextValue().get());
 		assertEquals(0x1234_ABCDL, sut.channel.getNextValue().get());
 	}
 

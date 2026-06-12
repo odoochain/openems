@@ -1,246 +1,343 @@
-import { Component, OnInit } from '@angular/core';
-import { FormGroup, Validators } from '@angular/forms';
-import { ActivatedRoute } from '@angular/router';
-import { FormlyFieldConfig } from '@ngx-formly/core';
-import { TranslateService } from '@ngx-translate/core';
-import { environment } from '../../environments';
-import { GetUserInformationRequest } from '../shared/jsonrpc/request/getUserInformationRequest';
-import { SetUserInformationRequest } from '../shared/jsonrpc/request/setUserInformationRequest';
-import { UpdateUserLanguageRequest } from '../shared/jsonrpc/request/updateUserLanguageRequest';
-import { GetUserInformationResponse } from '../shared/jsonrpc/response/getUserInformationResponse';
-import { Service, Websocket } from '../shared/shared';
-import { COUNTRY_OPTIONS } from '../shared/type/country';
-import { Language } from '../shared/type/language';
+// @ts-strict-ignore
+import { KeyValue } from "@angular/common";
+import { Component, effect, OnInit, untracked } from "@angular/core";
+import { FormGroup, Validators } from "@angular/forms";
+import { NavController } from "@ionic/angular";
+import { FormlyFieldConfig } from "@ngx-formly/core";
+import { TranslateService } from "@ngx-translate/core";
+import { environment, Theme as SystemTheme } from "../../environments";
+import { Changelog } from "../changelog/view/component/changelog.constants";
+import { Theme as UserTheme } from "../edge/history/shared";
+import { NavigationService } from "../shared/components/navigation/service/navigation.service";
+import { GetUserInformationRequest } from "../shared/jsonrpc/request/getUserInformationRequest";
+import { SetUserInformationRequest } from "../shared/jsonrpc/request/setUserInformationRequest";
+import { UpdateUserLanguageRequest } from "../shared/jsonrpc/request/updateUserLanguageRequest";
+import { GetUserInformationResponse } from "../shared/jsonrpc/response/getUserInformationResponse";
+import { UserSettings } from "../shared/jsonrpc/shared";
+import { States } from "../shared/ngrx-store/states";
+import { RouteService } from "../shared/service/route.service";
+import { UserService } from "../shared/service/user.service";
+import { Service, Websocket } from "../shared/shared";
+import { COUNTRY_OPTIONS } from "../shared/type/country";
+import { Language } from "../shared/type/language";
+import { Role } from "../shared/type/role";
+
+type CompanyUserInformation = UserInformation & { companyName: string };
 
 type UserInformation = {
-  firstname: string,
-  lastname: string,
-  email: string,
-  phone: string,
-  street: string,
-  zip: string,
-  city: string,
-  country: string
-}
+    firstname: string,
+    lastname: string,
+    email: string,
+    phone: string,
+    street: string,
+    zip: string,
+    city: string,
+    country: string
+};
+
 @Component({
-  templateUrl: './user.component.html'
+    templateUrl: "./user.component.html",
+    standalone: false,
 })
 export class UserComponent implements OnInit {
 
-  public environment = environment;
+    private static readonly DEFAULT_THEME: UserTheme = UserTheme.LIGHT; // Theme as of "Light","Dark" or "System" Themes.
+    protected userTheme: UserTheme; // Theme as of "Light","Dark" or "System" Themes.
+    protected systemTheme: SystemTheme; // SystemTheme as of "OpenEMS" Themes.
 
-  public readonly languages: Language[] = Language.ALL;
-  public currentLanguage: Language;
-  public isEditModeDisabled: boolean = true;
-  public form: { formGroup: FormGroup, fields: FormlyFieldConfig[], model: UserInformation };
-  public showInformation: boolean = false;
+    protected readonly themes: KeyValue<string, string>[] = [
+        { key: "Light", value: "light" },
+        { key: "Dark", value: "dark" },
+        { key: "System", value: "system" },
+    ];
+    protected readonly environment = environment;
+    protected readonly uiVersion = Changelog.UI_VERSION;
+    protected readonly languages: Language[] = Language.ALL;
+    protected currentLanguage: Language;
+    protected isEditModeDisabled: boolean = true;
+    protected form: { formGroup: FormGroup, model: UserInformation | CompanyUserInformation };
+    protected showInformation: boolean = false;
+    protected userInformationFields: FormlyFieldConfig[] = [{
+        key: "firstname",
+        type: "input",
+        props: {
+            label: this.translate.instant("REGISTER.FORM.FIRSTNAME"),
+            disabled: true,
+        },
+        validators: {
+            validation: ["person-name-prohibited-characters"],
+        },
+    },
+    {
+        key: "lastname",
+        type: "input",
+        props: {
+            label: this.translate.instant("REGISTER.FORM.LASTNAME"),
+            disabled: true,
+        },
+        validators: {
+            validation: ["person-name-prohibited-characters"],
+        },
+    }];
+    protected companyInformationFields: FormlyFieldConfig[] = [];
 
-  constructor(
-    public translate: TranslateService,
-    public service: Service,
-    private route: ActivatedRoute,
-    private websocket: Websocket
-  ) { }
+    protected isAtLeastAdmin: boolean = false;
+    protected isAllowedToSeeUserDetails: boolean = true;
+    protected useNewUi: boolean | null = null;
+    protected newNavigationForced: boolean = false;
 
-  ngOnInit() {
-    // Set currentLanguage to 
-    this.currentLanguage = Language.getByKey(localStorage.LANGUAGE) ?? Language.DEFAULT;
-    this.service.setCurrentComponent({ languageKey: 'Menu.user' }, this.route);
+    constructor(
+        public translate: TranslateService,
+        public service: Service,
+        private websocket: Websocket,
+        private userService: UserService,
+        private navigationService: NavigationService,
+        private routeService: RouteService,
+        protected navCtrl: NavController,
+    ) {
+        effect(async () => {
+            const user = this.userService.currentUser();
 
-    this.getUserInformation().then((userInformation) => {
-      this.form = {
-        formGroup: new FormGroup({}),
-        fields: this.getFields(),
-        model: userInformation
-      };
-      this.showInformation = true;
-    });
-  }
+            if (user && this.form == null) {
+                this.isAtLeastAdmin = Role.isAtLeast(user.globalRole, Role.ADMIN);
+                await this.updateUserInformation();
 
-  public applyChanges() {
-    let user = {
-      user: {
-        lastname: this.form.model.lastname,
-        firstname: this.form.model.firstname,
-        email: this.form.model.email,
-        phone: this.form.model.phone,
-        address: {
-          street: this.form.model.street,
-          zip: this.form.model.zip,
-          city: this.form.model.city,
-          country: this.form.model.country
-        }
-      }
-    };
-    this.service.websocket.sendRequest(new SetUserInformationRequest(user)).then(() => {
-      this.service.toast(this.translate.instant('General.changeAccepted'), 'success');
-    }).catch((reason) => {
-      this.service.toast(this.translate.instant('General.changeFailed') + '\n' + reason.error.message, 'danger');
-    });
-    this.enableAndDisableFormFields();
-    this.form.formGroup.markAsPristine();
-  }
-
-  public enableAndDisableEditMode(): void {
-    if (this.isEditModeDisabled == false) {
-      this.getUserInformation().then((userInformation) => {
-        this.form = {
-          formGroup: new FormGroup({}),
-          fields: this.getFields(),
-          model: userInformation
-        };
-      });
+                this.isAllowedToSeeUserDetails = this.isUserAllowedToSeeContactDetails(user.id);
+                this.showInformation = this.form != null;
+                this.userTheme = user.getThemeFromSettings() ?? UserComponent.DEFAULT_THEME;
+                this.useNewUi = user.getUseNewUIFromSettings();
+                const config = await untracked(() => this.service.currentEdge().getFirstValidConfig(service.websocket));
+                this.newNavigationForced = NavigationService.forceNewNavigation(config);
+            }
+        });
     }
 
-    this.enableAndDisableFormFields();
-  }
+    ngOnInit() {
+        this.currentLanguage = Language.getCurrentLanguage();
+        this.systemTheme = environment.theme as SystemTheme;
+    }
 
-  public enableAndDisableFormFields(): boolean {
-    // Update Fields
-    this.form?.fields[0].fieldGroup.forEach(element => {
-      element.templateOptions.disabled = !element.templateOptions.disabled;
-    });
-    return this.isEditModeDisabled = !this.isEditModeDisabled;
-  }
+    public setTheme(theme: UserTheme): void {
+        this.userService.selectTheme(theme);
+    }
 
+    public applyChanges() {
+        const params: SetUserInformationRequest["params"] = {
+            user: {
+                lastname: this.form.model.lastname,
+                firstname: this.form.model.firstname,
+                email: this.form.model.email,
+                phone: this.form.model.phone,
+                address: {
+                    street: this.form.model.street,
+                    zip: this.form.model.zip,
+                    city: this.form.model.city,
+                    country: this.form.model.country,
+                },
+            },
+        };
 
-  public getFields(): FormlyFieldConfig[] {
+        this.service.websocket.sendRequest(new SetUserInformationRequest(params)).then(() => {
+            this.service.toast(this.translate.instant("GENERAL.CHANGE_ACCEPTED"), "success");
+        }).catch((reason) => {
+            this.service.toast(this.translate.instant("GENERAL.CHANGE_FAILED") + "\n" + reason.error.message, "danger");
+        });
+        this.enableAndDisableFormFields();
+        this.form.formGroup.markAsPristine();
+    }
 
-    return [{
-      fieldGroup: [
-        {
-          key: "firstname",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.firstname"),
-            disabled: true
-          }
-        },
-        {
-          key: "lastname",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.lastname"),
-            disabled: true
-          }
-        },
-        {
-          key: "street",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.street"),
-            disabled: true
-          }
-        },
-        {
-          key: "zip",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.zip"),
-            disabled: true
-          }
-        },
-        {
-          key: "city",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.city"),
-            disabled: true
-          }
-        },
-        {
-          key: "country",
-          type: "select",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.country"),
-            options: COUNTRY_OPTIONS(this.translate),
-            disabled: true
-          }
-        },
-        {
-          key: "email",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.email"),
-            disabled: true
-          },
-          validators: {
-            validation: [Validators.email]
-          }
-        },
-        {
-          key: "phone",
-          type: "input",
-          templateOptions: {
-            label: this.translate.instant("Register.Form.phone"),
-            disabled: true
-          }
+    public enableAndDisableEditMode(): void {
+        if (!this.isEditModeDisabled) {
+            this.updateUserInformation();
         }
-      ]
-    }];
-  }
+        this.enableAndDisableFormFields();
+    }
 
-  public getUserInformation(): Promise<UserInformation> {
+    public enableAndDisableFormFields(): boolean {
+        this.userInformationFields = this.userInformationFields.map(field => {
+            field.props.disabled = !field.props.disabled;
+            return field;
+        });
+        return this.isEditModeDisabled = !this.isEditModeDisabled;
+    }
 
-    return new Promise(resolve => {
-      var interval = setInterval(() => {
-        if (this.websocket.status == 'online') {
-          this.service.websocket.sendRequest(new GetUserInformationRequest()).then((response: GetUserInformationResponse) => {
-            let user = response.result.user;
+    public getUserInformation(): Promise<UserInformation | CompanyUserInformation> {
+        return new Promise(resolve => {
+            const interval = setInterval(() => {
+                if (States.isAtLeast(this.websocket.state(), States.AUTHENTICATED)) {
+                    this.service.websocket.sendRequest(new GetUserInformationRequest()).then((response: GetUserInformationResponse) => {
+                        const user = response.result.user;
+                        resolve({
+                            lastname: user.lastname,
+                            firstname: user.firstname,
+                            email: user.email,
+                            phone: user.phone,
+                            street: user.address.street,
+                            zip: user.address.zip,
+                            city: user.address.city,
+                            country: user.address.country,
+                            ...(user.company?.name ? { companyName: user.company.name } : {}),
+                        });
+                    }).catch(() => {
+                        resolve({
+                            lastname: "",
+                            firstname: "",
+                            email: "",
+                            phone: "",
+                            street: "",
+                            zip: "",
+                            city: "",
+                            country: "",
+                        });
+                    });
+                    clearInterval(interval);
+                }
+            }, 1000);
+        });
+    }
 
-            resolve({
-              lastname: user.lastname,
-              firstname: user.firstname,
-              email: user.email,
-              phone: user.phone,
-              street: user.address.street,
-              zip: user.address.zip,
-              city: user.address.city,
-              country: user.address.country
-            });
-          }).catch(() => {
-            resolve({
-              lastname: "",
-              firstname: "",
-              email: "",
-              phone: "",
-              street: "",
-              zip: "",
-              city: "",
-              country: ""
-            });
-          });
-          clearInterval(interval);
-        }
-      }, 1000);
-    });
-  }
+    /**
+     * Logout from OpenEMS Edge or Backend.
+     */
+    public doLogout() {
+        this.userService.currentUser.set(null);
+        this.websocket.logout();
+    }
 
-  /**
-   * Logout from OpenEMS Edge or Backend.
-   */
-  public doLogout() {
-    this.websocket.logout();
-  }
+    // TODO redo when darkMode is applied
+    // protected toggleMode(key: string, event: CustomEvent) {
+    //   let userSettings = this.service.currentUser.settings;
+    //   userSettings[key] = event.detail['checked'];
 
-  public toggleDebugMode(event: CustomEvent) {
+    //   this.websocket.sendRequest(
+    //     new UpdateUserSettingsRequest({ settings: userSettings })).then(() => {
+    //       this.service.toast(this.translate.instant('GENERAL.CHANGE_ACCEPTED'), 'success');
+    //     }).catch((reason) => {
+    //       this.service.toast(this.translate.instant('GENERAL.CHANGE_FAILED') + '\n' + reason.error.message, 'danger');
+    //     });
+    // }
 
-    sessionStorage.setItem("DEBUGMODE", event.detail['checked']);
-    this.environment.debugMode = event.detail['checked'];
-  }
+    public navigateToChangelog(event: Event) {
+        event.preventDefault();
+        const prev = this.routeService.getCurrentUrl();
+        const base = prev.replace(/^\//, "");
+        const userUrl = base + "/changelog";
+        this.navCtrl.navigateRoot(userUrl);
+    }
 
-  public setLanguage(language: Language): void {
-    // Get Key of LanguageTag Enum
-    localStorage.LANGUAGE = language.key;
+    public toggleDebugMode(event: Event) {
+        localStorage.setItem("DEBUGMODE", (event as CustomEvent).detail["checked"]);
+        this.environment.debugMode = (event as CustomEvent).detail["checked"];
+    }
 
-    this.service.setLang(language);
-    this.websocket.sendRequest(new UpdateUserLanguageRequest({ language: language.key })).then(() => {
-      this.service.toast(this.translate.instant('General.changeAccepted'), 'success');
-    }).catch((reason) => {
-      this.service.toast(this.translate.instant('General.changeFailed') + '\n' + reason.error.message, 'danger');
-    });
+    public async toggleNewUI(event: Event) {
+        const isToggleOn = (event as CustomEvent).detail["checked"];
+        this.service.startSpinner("user");
+        await this.userService.updateUserSettingsWithProperty(UserSettings.USE_NEW_UI, isToggleOn);
+        this.service.stopSpinner("user");
+    }
 
-    this.currentLanguage = language;
-    this.translate.use(language.key);
-  }
+    public setLanguage(language: Language): void {
+        // Get Key of LanguageTag Enum
+        localStorage.LANGUAGE = language.key;
+
+        this.service.setLang(language);
+        this.websocket.sendRequest(new UpdateUserLanguageRequest({ language: language.key })).then(() => {
+            this.service.toast(this.translate.instant("GENERAL.CHANGE_ACCEPTED"), "success");
+        }).catch((reason) => {
+            this.service.toast(this.translate.instant("GENERAL.CHANGE_FAILED") + "\n" + reason.error.message, "danger");
+        });
+
+        this.currentLanguage = language;
+        this.translate.use(language.key);
+    }
+
+    private updateUserInformation(): Promise<void> {
+        return this.getUserInformation().then((userInformation) => {
+            this.form = {
+                formGroup: new FormGroup({}),
+                model: userInformation,
+            };
+
+            const baseInformationFields: FormlyFieldConfig[] = [{
+                key: "street",
+                type: "input",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.STREET"),
+                    disabled: true,
+                },
+            },
+            {
+                key: "zip",
+                type: "input",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.ZIP"),
+                    disabled: true,
+                },
+            },
+            {
+                key: "city",
+                type: "input",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.CITY"),
+                    disabled: true,
+                },
+            },
+            {
+                key: "country",
+                type: "select",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.COUNTRY"),
+                    options: COUNTRY_OPTIONS(this.translate),
+                    disabled: true,
+                },
+            },
+            {
+                key: "email",
+                type: "input",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.EMAIL"),
+                    disabled: true,
+                },
+                validators: {
+                    validation: [Validators.email],
+                },
+            },
+            {
+                key: "phone",
+                type: "input",
+                props: {
+                    label: this.translate.instant("REGISTER.FORM.PHONE"),
+                    disabled: true,
+                },
+
+            }];
+
+            if (Object.prototype.hasOwnProperty.call(userInformation, "companyName")) {
+                this.companyInformationFields = [{
+                    key: "companyName",
+                    type: "input",
+                    props: {
+                        label: this.translate.instant("REGISTER.FORM.COMPANY_NAME"),
+                        disabled: true,
+                    },
+                },
+                ...baseInformationFields,
+                ];
+            } else {
+                this.userInformationFields = baseInformationFields;
+            }
+        });
+    }
+
+    /**
+     * Checks if user is allowed to see contact details
+     *
+     * @param id the user id
+     * @returns true, if user is allowed to see contact details
+     */
+    private isUserAllowedToSeeContactDetails(id: string): boolean {
+        return true;
+    }
 }
+

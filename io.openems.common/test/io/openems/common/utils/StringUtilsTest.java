@@ -1,6 +1,9 @@
 package io.openems.common.utils;
 
+import static io.openems.common.utils.StringUtils.definedOrElse;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -50,8 +53,53 @@ public class StringUtilsTest {
 	}
 
 	@Test
-	public void testMatchesFloatPattern() {
-		assertTrue(StringUtils.matchesFloatPattern("208.6"));
+	public void testDefinedOrElse() {
+		assertEquals("foo", definedOrElse("foo", "bar"));
+		assertEquals("bar", definedOrElse(null, "bar"));
+		assertEquals("bar", definedOrElse("", "bar"));
+		assertEquals("bar", definedOrElse(" ", "bar"));
+		assertEquals("bar", definedOrElse("	", "bar"));
+	}
+
+	@Test
+	public void testParseNumberFromNameNull() throws Exception {
+		assertTrue(StringUtils.parseNumberFromName(null).isEmpty());
+	}
+
+	@Test
+	public void testParseNumberFromNameInvalidString() throws Exception {
+		assertTrue(StringUtils.parseNumberFromName("edge").isEmpty());
+	}
+
+	@Test
+	public void testParseNumberFromNameValidString() throws Exception {
+		final var parsedNumber = StringUtils.parseNumberFromName("edge404");
+		assertTrue(parsedNumber.isPresent());
+		assertEquals(404, parsedNumber.getAsInt());
+	}
+
+	@Test
+	public void testEmptyToNull_ShouldReturnNull_WhenNullEmptyOrBlank() {
+		String[] inputs = { null, "", "   ", "\t\n" };
+		for (String input : inputs) {
+			assertNull(StringUtils.emptyToNull(input));
+		}
+	}
+
+	@Test
+	public void testEmptyToNull_ShouldReturnSameString_WhenNonBlank() {
+		String[] inputs = { "abc", "  abc  ", "0", "true" };
+		for (String input : inputs) {
+			assertEquals(input, StringUtils.emptyToNull(input));
+		}
+	}
+
+	@Test
+	public void testContainsIgnoreCase() {
+		assertTrue(StringUtils.containsIgnoreCase("Hello, its me", "ITS"));
+		assertTrue(StringUtils.containsIgnoreCase("Hello, its me", "its"));
+		assertFalse(StringUtils.containsIgnoreCase("Hello, its me", "itse"));
+		assertFalse(StringUtils.containsIgnoreCase("Hello, its me", "ITSE"));
 	}
 
 }

@@ -114,7 +114,7 @@ public interface OffGridSwitch extends OpenemsComponent {
 	 * @return the Channel {@link Value}
 	 */
 	public default Optional<Contactor> getGroundingContactor() {
-		var groundingContactor = this.getMainContactorChannel().value();
+		var groundingContactor = this.getGroundingContactorChannel().value();
 		return groundingContactor.asOptional().map(value -> {
 			return value ? Contactor.CLOSE : Contactor.OPEN;
 		});
@@ -160,6 +160,8 @@ public interface OffGridSwitch extends OpenemsComponent {
 
 	public static enum Contactor {
 		/**
+		 * Contactor OPEN.
+		 * 
 		 * <ul>
 		 * <li>In Normally-Open: Switch the relay off.
 		 * <li>In Normally-Close: Switch the relay on.
@@ -167,6 +169,8 @@ public interface OffGridSwitch extends OpenemsComponent {
 		 */
 		OPEN, //
 		/**
+		 * Contactor CLOSE.
+		 * 
 		 * <ul>
 		 * <li>In Normally-Open: Switch the relay on.
 		 * <li>In Normally-Close: Switch the relay off.

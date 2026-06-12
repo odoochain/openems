@@ -1,6 +1,9 @@
 package io.openems.backend.metadata.odoo;
 
-import java.util.stream.Collectors;
+import static io.openems.backend.metadata.odoo.MetadataOdoo.ODOO_MODULE_NAME;
+import static io.openems.backend.metadata.odoo.MetadataOdoo.ODOO_SETUP_PROTOCOL_EDGE_FIELD;
+import static java.util.stream.Collectors.joining;
+
 import java.util.stream.Stream;
 
 public interface Field {
@@ -33,6 +36,12 @@ public interface Field {
 	 */
 	public boolean isQuery();
 
+	private static <T extends Enum<? extends Field>> Stream<Field> getSqlQueryFieldsOf(Class<T> field) {
+		return Stream.of(field.getEnumConstants()) //
+				.map(v -> v instanceof Field f ? f : null) //
+				.filter(Field::isQuery);
+	}
+
 	/**
 	 * Gets all fields that should be queried as a comma separated string.
 	 *
@@ -43,7 +52,58 @@ public interface Field {
 		return Stream.of(fields) //
 				.filter(Field::isQuery) //
 				.map(Field::id) //
-				.collect(Collectors.joining(","));
+				.collect(joining(","));
+	}
+
+	/**
+	 * Gets all fields that should be queried as a list of {@link Field} for given
+	 * enum class.
+	 * 
+	 * @param <T>   enum implementing field
+	 * @param field class of enum
+	 * @return list of fields
+	 */
+	public static <T extends Enum<? extends Field>> Field[] getSqlQueryFields(Class<T> field) {
+		return Field.getSqlQueryFieldsOf(field) //
+				.toArray(Field[]::new);
+	}
+
+	/**
+	 * Gets all fields that should be queried as a list of {@link Field} for given
+	 * enum class extended with given foreign fields.
+	 * 
+	 * @param <T>     enum implementing field
+	 * @param field   class of enum
+	 * @param foreign additional fields
+	 * @return list of fields
+	 */
+	public static <T extends Enum<? extends Field>> Field[] getSqlQueryFields(Class<T> field, Field... foreign) {
+		var querryStream = Field.getSqlQueryFieldsOf(field);
+		var foreignStream = Stream.of(foreign);
+		return Stream.concat(querryStream, foreignStream).toArray(Field[]::new);
+	}
+
+	public record GenericField(String id) implements Field {
+		public GenericField(Field... fields) {
+			this(Stream.of(fields) //
+					.map(Field::name) //
+					.collect(joining(".")));
+		}
+
+		@Override
+		public int index() {
+			return -1;
+		}
+
+		@Override
+		public String name() {
+			return this.id.toUpperCase();
+		}
+
+		@Override
+		public boolean isQuery() {
+			return false;
+		}
 	}
 
 	/**
@@ -56,15 +116,25 @@ public interface Field {
 		NAME("name", true), //
 		COMMENT("comment", true), //
 		OPENEMS_VERSION("openems_version", true), //
-		PRODUCTTYPE("producttype", true), //
-		OPENEMS_CONFIG("openems_config", false), //
-		OPENEMS_CONFIG_COMPONENTS("openems_config_components", false), //
 		LASTMESSAGE("lastmessage", true), //
 		OPENEMS_SUM_STATE("openems_sum_state_level", false), //
 		OPENEMS_IS_CONNECTED("openems_is_connected", false), //
-		STOCK_PRODUCTION_LOT_ID("stock_production_lot_id", false);
+		FIRST_SETUP_PROTOCOL("first_setup_protocol_date", false), //
+		SETUP_PROTOCOL_IDS("setup_protocol_ids", false), //
 
-		public static final String ODOO_MODEL = "openems.device";
+		// Hardware
+		PRODUCTTYPE("producttype", true), //
+		EMS_TYPE("ems_type", false), //
+
+		// Configuration
+		OPENEMS_CONFIG("openems_config", false), //
+		OPENEMS_CONFIG_COMPONENTS("openems_config_components", false), //
+
+		// Product
+		STOCK_PRODUCTION_LOT_ID("stock_production_lot_id", false), //
+		;
+
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".device";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -113,7 +183,7 @@ public interface Field {
 		TEASER("teaser", false), //
 		DETAILS("details", false);
 
-		public static final String ODOO_MODEL = "openems.openemsconfigupdate";
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".openemsconfigupdate";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -163,11 +233,10 @@ public interface Field {
 		DEVICE_ODOO_ID("device_id", false), //
 		USER_ODOO_ID("user_id", true), //
 		ROLE("role", false), //
-		TIME_TO_WAIT("time_to_wait", true), //
 		LAST_NOTIFICATION("last_notification", true), //
 		; //
 
-		public static final String ODOO_MODEL = "openems.device_user_role";
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".device_user_role";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -216,7 +285,11 @@ public interface Field {
 		PARTNER("partner_id", true), //
 		GLOBAL_ROLE("global_role", true), //
 		GROUPS("groups_id", true), //
-		OPENEMS_LANGUAGE("openems_language", true);
+		OPENEMS_LANGUAGE("openems_language", true), //
+
+		// when oauth is used
+		OAUTH_PROVIDER_ID("oauth_provider_id", false), //
+		OAUTH_UID("oauth_uid", false);
 
 		public static final String ODOO_MODEL = "res.users";
 		public static final String ODOO_TABLE = User.ODOO_MODEL.replace(".", "_");
@@ -371,9 +444,11 @@ public interface Field {
 		CUSTOMER("customer_id", true), //
 		DIFFERENT_LOCATION("different_location_id", true), //
 		INSTALLER("installer_id", true), //
-		EDGE("device_id", true);
+		EDGE(ODOO_SETUP_PROTOCOL_EDGE_FIELD, true), //
+		TYPE("type", true), //
+		CREATE_DATE("create_date", false);
 
-		public static final String ODOO_MODEL = "openems.setup_protocol";
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".setup_protocol";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -420,7 +495,7 @@ public interface Field {
 		SEQUENCE("sequence", true), //
 		LOT("lot_id", true);
 
-		public static final String ODOO_MODEL = "openems.setup_protocol_production_lot";
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".setup_protocol_production_lot";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -464,9 +539,15 @@ public interface Field {
 
 	public enum SetupProtocolItem implements Field {
 		SETUP_PROTOCOL("setup_protocol_id", true), //
-		SEQUENCE("sequence", true);
+		SEQUENCE("sequence", true), //
+		CATEGORY("category", false), //
+		NAME("name", false), //
+		VALUE("value", false), //
+		VIEW("view", false), //
+		FIELD("field", false), //
+		;
 
-		public static final String ODOO_MODEL = "openems.setup_protocol_item";
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".setup_protocol_item";
 		public static final String ODOO_TABLE = ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -512,7 +593,7 @@ public interface Field {
 		SERIAL_NUMBER("name", true), //
 		PRODUCT("product_id", true);
 
-		public static final String ODOO_MODEL = "stock.production.lot";
+		public static final String ODOO_MODEL = "stock.lot";
 		public static final String ODOO_TABLE = StockProductionLot.ODOO_MODEL.replace(".", "_");
 
 		private static final class StaticFields {
@@ -521,7 +602,6 @@ public interface Field {
 
 		private final int queryIndex;
 		private final String id;
-
 		/**
 		 * Holds information if this Field should be queried from and written to
 		 * Database.
@@ -552,6 +632,106 @@ public interface Field {
 		public boolean isQuery() {
 			return this.query;
 		}
+	}
+
+	public enum AlertingSetting implements Field {
+		DEVICE_ODOO_ID("device_id", true), //
+		DEVICE_NAME("device_name", false), //
+		USER_ODOO_ID("user_id", true), //
+		USER_LOGIN("user_login", false), //
+		OFFLINE_DELAY("offline_delay", true), //
+		WARNING_DELAY("warning_delay", true), //
+		FAULT_DELAY("fault_delay", true), //
+		OFFLINE_LAST_NOTIFICATION("offline_last_notification", true), //
+		SUM_STATE_LAST_NOTIFICATION("sum_state_last_notification", true);
+
+		public static final String ODOO_MODEL = ODOO_MODULE_NAME + ".alerting";
+		public static final String ODOO_TABLE = AlertingSetting.ODOO_MODEL.replace(".", "_");
+
+		private static final class StaticFields {
+			private static int nextQueryIndex = 1;
+		}
+
+		private final int queryIndex;
+		private final String id;
+
+		/**
+		 * Holds information if this Field should be queried from and written to
+		 * Database.
+		 */
+		private final boolean query;
+
+		private AlertingSetting(String id, boolean query) {
+			this.id = id;
+			this.query = query;
+			if (query) {
+				this.queryIndex = StaticFields.nextQueryIndex++;
+			} else {
+				this.queryIndex = -1;
+			}
+		}
+
+		@Override
+		public String id() {
+			return this.id;
+		}
+
+		@Override
+		public int index() {
+			return this.queryIndex;
+		}
+
+		@Override
+		public boolean isQuery() {
+			return this.query;
+		}
+	}
+
+	public enum AuthOAuthProvider implements Field {
+		NAME("name", true), //
+		;
+
+		public static final String ODOO_MODEL = "auth.oauth.provider";
+		public static final String ODOO_TABLE = AuthOAuthProvider.ODOO_MODEL.replace(".", "_");
+
+		private static final class StaticFields {
+			private static int nextQueryIndex = 1;
+		}
+
+		private final int queryIndex;
+		private final String id;
+
+		/**
+		 * Holds information if this Field should be queried from and written to
+		 * Database.
+		 */
+		private final boolean query;
+
+		private AuthOAuthProvider(String id, boolean query) {
+			this.id = id;
+			this.query = query;
+			if (query) {
+				this.queryIndex = AuthOAuthProvider.StaticFields.nextQueryIndex++;
+			} else {
+				this.queryIndex = -1;
+			}
+		}
+
+		@Override
+		public String id() {
+			return this.id;
+		}
+
+		@Override
+		public int index() {
+			return this.queryIndex;
+		}
+
+		@Override
+		public boolean isQuery() {
+			return this.query;
+		}
+
 	}
 
 }

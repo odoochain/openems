@@ -2,15 +2,23 @@ package io.openems.backend.alerting;
 
 import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.function.Consumer;
 
 import io.openems.common.event.EventReader;
 
 public interface Handler<T extends Message> {
 
 	/**
+	 * unique identifier name as lower snake_case.
+	 * 
+	 * @return string id
+	 */
+	String id();
+
+	/**
 	 * Stop the Handler.
 	 */
-	public void stop();
+	void stop();
 
 	/**
 	 * Send the messages.
@@ -18,20 +26,34 @@ public interface Handler<T extends Message> {
 	 * @param sentAt   TimeStamp at with sending was initiated
 	 * @param messages which to send
 	 */
-	public void send(ZonedDateTime sentAt, List<T> messages);
+	void send(ZonedDateTime sentAt, List<T> messages);
 
 	/**
 	 * Return generic type of handler as Class object.
 	 *
 	 * @return GenericType of handler
 	 */
-	public Class<T> getGeneric();
+	Class<T> getGeneric();
 
 	/**
 	 * Handle given event.
-	 * 
-	 * @param event to handle
-	 * @return Runnable to be scheduled in executor
+	 *
+	 * @param eventTopic to handle
+	 * @return {@link Consumer} to be scheduled in executor
 	 */
-	public Runnable getEventHandler(EventReader event);
+	Consumer<EventReader> getEventHandler(String eventTopic);
+
+	/**
+	 * Get Metrics about Messages.
+	 * 
+	 * @return message metrics
+	 */
+	HandlerMetrics getMetrics();
+	
+	/**
+	 * Get debug log about the Handler.
+	 * 
+	 * @return debug log
+	 */
+	String debugLog();
 }

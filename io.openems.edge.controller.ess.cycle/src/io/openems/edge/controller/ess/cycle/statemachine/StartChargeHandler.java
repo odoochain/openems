@@ -1,40 +1,41 @@
 package io.openems.edge.controller.ess.cycle.statemachine;
 
+import static io.openems.edge.common.type.Phase.SingleOrAllPhase.ALL;
+import static io.openems.edge.ess.power.api.Pwr.ACTIVE;
+import static io.openems.edge.ess.power.api.Relationship.EQUALS;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.edge.common.statemachine.StateHandler;
 import io.openems.edge.controller.ess.cycle.statemachine.StateMachine.State;
+import io.openems.edge.ess.api.PowerConstraint;
 
 public class StartChargeHandler extends StateHandler<State, Context> {
 
 	private final Logger log = LoggerFactory.getLogger(StartChargeHandler.class);
 
 	@Override
-	public State runAndGetNextState(Context context) throws IllegalArgumentException, OpenemsNamedException {
-		if (context.config.maxSoc() == 100) {
-			if (context.maxChargePower == 0) {
-				// Wait for hysteresis
-				if (context.waitForChangeState(State.START_CHARGE, State.CONTINUE_WITH_DISCHARGE)) {
-					return State.CONTINUE_WITH_DISCHARGE;
-				}
-				return State.START_CHARGE;
-			}
-		} else if (context.ess.getSoc().orElse(0) >= context.config.maxSoc()) {
-			// Wait for hysteresis
-			if (context.waitForChangeState(State.START_CHARGE, State.CONTINUE_WITH_DISCHARGE)) {
-				return State.CONTINUE_WITH_DISCHARGE;
-			}
-			return State.START_CHARGE;
+	public State runAndGetNextState(Context context) throws OpenemsNamedException {
+		final var controller = context.getParent();
+		final var ess = context.ess;
+		final var config = context.config;
+
+		if (config.maxSoc() == 100 && context.allowedChargePower == 0) {
+			return context.waitForChangeState(State.START_CHARGE, State.CONTINUE_WITH_DISCHARGE);
 		}
 
-		// get max charge/discharge power
-		var power = context.getChargePower();
-		context.logInfo(this.log, "START CHARGE with [" + power + " W]" //
-				+ " Current Cycle [ " + context.getParent().getCompletedCycles() + "] " //
-				+ "out of " + context.config.totalCycleNumber() + "]");
-		context.ess.setActivePowerLessOrEquals(power);
+		if (ess.getSoc().get() > config.maxSoc()) {
+			return context.waitForChangeState(State.START_CHARGE, State.CONTINUE_WITH_DISCHARGE);
+		}
+
+		var power = context.getAcPower(ess, config.hybridEssMode(), config.power());
+		PowerConstraint.apply(ess, controller.id(), ALL, ACTIVE, EQUALS, -power);
+
+		context.logInfo(this.log, "START CHARGE with [" + -power + " W]" //
+				+ " Current Cycle [ " + controller.getCompletedCycles() + "] " //
+				+ "out of " + config.totalCycleNumber() + "]");
 
 		return State.START_CHARGE;
 	}

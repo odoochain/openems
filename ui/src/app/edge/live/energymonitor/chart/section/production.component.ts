@@ -1,59 +1,50 @@
-import { animate, state, style, transition, trigger } from '@angular/animations';
-import { Component, OnDestroy, OnInit } from '@angular/core';
-import { TranslateService } from '@ngx-translate/core';
-import { UnitvaluePipe } from 'src/app/shared/pipe/unitvalue/unitvalue.pipe';
-import { DefaultTypes } from '../../../../../shared/service/defaulttypes';
-import { Service, Utils } from '../../../../../shared/shared';
-import { AbstractSection, EnergyFlow, Ratio, SvgEnergyFlow, SvgSquare, SvgSquarePosition } from './abstractsection.component';
+// @ts-strict-ignore
+import { Component, OnDestroy, OnInit } from "@angular/core";
+import { TranslateService } from "@ngx-translate/core";
+import { Subscription } from "rxjs";
+import { UnitvaluePipe } from "src/app/shared/pipe/unitvalue/unitvalue.pipe";
+import { environment } from "src/environments";
+import { Service, Utils } from "../../../../../shared/shared";
+import { DefaultTypes } from "../../../../../shared/type/defaulttypes";
+import { AbstractSection, EnergyFlow, Ratio, SvgEnergyFlow, SvgSquare, SvgSquarePosition } from "./abstractsection.component";
+import { AnimationService } from "./animation.service";
 
 @Component({
-    selector: '[productionsection]',
-    templateUrl: './production.component.html',
-    animations: [
-        trigger('Production', [
-            state('show', style({
-                opacity: 0.4,
-                transform: 'translateY(0)'
-            })),
-            state('hide', style({
-                opacity: 0.1,
-                transform: 'translateY(17%)'
-            })),
-            transition('show => hide', animate('650ms ease-out')),
-            transition('hide => show', animate('0ms ease-in'))
-        ])
-    ]
+    selector: "[productionsection]",
+    templateUrl: "./production.component.html",
+    styleUrls: ["../animation.scss"],
+    standalone: false,
 })
 export class ProductionSectionComponent extends AbstractSection implements OnInit, OnDestroy {
 
     private unitpipe: UnitvaluePipe;
-    // animation variable to stop animation on destroy
-    private startAnimation = null;
-    private showAnimation: boolean = false;
+    private subShow?: Subscription;
+    private productionAnimationClass: string = "production-hide";
     private animationTrigger: boolean = false;
 
     constructor(
         translate: TranslateService,
         service: Service,
-        unitpipe: UnitvaluePipe
+        unitpipe: UnitvaluePipe,
+        private animationService: AnimationService,
     ) {
-        super('General.production', "up", "#36aed1", translate, service, "Common_Production");
+        super("GENERAL.PRODUCTION", "up", "var(--ion-color-primary)", translate, service, "Common_Production");
         this.unitpipe = unitpipe;
     }
 
     ngOnInit() {
         this.adjustFillRefbyBrowser();
+        this.subShow = this.animationService.toggleAnimation$.subscribe((show) => {
+            this.productionAnimationClass = show ? "production-show" : "production-hide";
+        });
+    }
+
+    ngOnDestroy() {
+        this.subShow?.unsubscribe();
     }
 
     toggleAnimation() {
-        this.startAnimation = setInterval(() => {
-            this.showAnimation = !this.showAnimation;
-        }, this.animationSpeed);
         this.animationTrigger = true;
-    }
-
-    get stateName() {
-        return this.showAnimation ? 'show' : 'hide';
     }
 
     protected getStartAngle(): number {
@@ -65,7 +56,7 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
     }
 
     protected getRatioType(): Ratio {
-        return 'Only Positive [0,1]';
+        return "Only Positive [0,1]";
     }
 
     protected _updateCurrentData(sum: DefaultTypes.Summary): void {
@@ -86,13 +77,13 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
     }
 
     protected getSquarePosition(square: SvgSquare, innerRadius: number): SvgSquarePosition {
-        let x = (square.length / 2) * (-1);
-        let y = (innerRadius - 10) * (-1);
+        const x = (square.length / 2) * (-1);
+        const y = (innerRadius - 10) * (-1);
         return new SvgSquarePosition(x, y);
     }
 
     protected getImagePath(): string {
-        return "icon/production.svg";
+        return environment.icons.COMMON.PRODUCTION;
     }
 
     protected getValueText(value: number): string {
@@ -100,7 +91,7 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
             return "";
         }
 
-        return this.unitpipe.transform(value, 'kW');
+        return this.unitpipe.transform(value, "kW");
     }
 
     protected initEnergyFlow(radius: number): EnergyFlow {
@@ -113,15 +104,15 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
     }
 
     protected getSvgEnergyFlow(ratio: number, radius: number): SvgEnergyFlow {
-        let v = Math.abs(ratio);
-        let r = radius;
-        let p = {
+        const v = Math.abs(ratio);
+        const r = radius;
+        const p = {
             topLeft: { x: v * -1, y: r * -1 },
             bottomLeft: { x: v * -1, y: v * -1 },
             topRight: { x: v, y: r * -1 },
             bottomRight: { x: v, y: v * -1 },
             middleBottom: { x: 0, y: 0 },
-            middleTop: { x: 0, y: r * -1 + v }
+            middleTop: { x: 0, y: r * -1 + v },
         };
         if (ratio < 0) {
             // towards top
@@ -133,16 +124,16 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
     }
 
     protected getSvgAnimationEnergyFlow(ratio: number, radius: number): SvgEnergyFlow {
-        let v = Math.abs(ratio);
-        let r = radius;
-        let animationWidth = r * -1 + v;
+        const v = Math.abs(ratio);
+        const r = radius;
+        const animationWidth = r * -1 + v;
         let p = {
             topLeft: { x: v * -1, y: r * -1 },
             bottomLeft: { x: v * -1, y: v * -1 },
             topRight: { x: v, y: r * -1 },
             bottomRight: { x: v, y: v * -1 },
             middleBottom: { x: 0, y: 0 },
-            middleTop: { x: 0, y: r * -1 + v }
+            middleTop: { x: 0, y: r * -1 + v },
         };
         if (ratio > 0) {
             // towards bottom
@@ -155,7 +146,4 @@ export class ProductionSectionComponent extends AbstractSection implements OnIni
         return p;
     }
 
-    ngOnDestroy() {
-        clearInterval(this.startAnimation);
-    }
 }

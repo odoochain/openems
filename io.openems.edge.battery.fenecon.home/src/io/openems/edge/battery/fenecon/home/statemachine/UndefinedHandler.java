@@ -1,36 +1,52 @@
 package io.openems.edge.battery.fenecon.home.statemachine;
 
 import io.openems.edge.battery.fenecon.home.statemachine.StateMachine.State;
-import io.openems.edge.common.statemachine.StateHandler;
 
-public class UndefinedHandler extends StateHandler<State, Context> {
+public class UndefinedHandler extends StateMachine.BatteryStateHandler {
 
 	@Override
 	public State runAndGetNextState(Context context) {
 		var battery = context.getParent();
 
-		switch (battery.getStartStopTarget()) {
-		case UNDEFINED:
+		return switch (battery.getStartStopTarget()) {
+		case UNDEFINED ->
 			// Stuck in UNDEFINED State
-			return State.UNDEFINED;
+			State.UNDEFINED;
 
-		case START:
+		case START -> {
 			// force START
-			if (battery.hasFaults()) {
-				// Has Faults -> error handling
-				return State.ERROR;
-			} else {
-				// No Faults -> start
-				return State.GO_RUNNING;
+			if (battery.isFirmwareUpdateRunning()) {
+				yield State.FIRMWARE_UPDATE;
 			}
 
-		case STOP:
-			// STOP is impossible -> stuck in GO_STOPPED State
-			return State.GO_STOPPED;
+			if (battery.getModbusCommunicationFailed()) {
+				// Modbus Communication Failed -> try to start
+				yield State.GO_RUNNING;
+
+			} else if (battery.hasFaults()) {
+
+				// Has Faults -> error handling
+				yield State.ERROR;
+			} else {
+				// No Faults -> start
+				yield State.GO_RUNNING;
+			}
 		}
 
-		assert false;
-		return State.UNDEFINED; // can never happen
+		case STOP ->
+			// force STOP
+			State.GO_STOPPED;
+		};
+	}
+
+	@Override
+	public boolean isChargeAllowed(Context context) {
+		return false;
+	}
+
+	@Override
+	public boolean isDischargeAllowed(Context context) {
+		return false;
 	}
 
 }

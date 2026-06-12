@@ -27,8 +27,8 @@ public class QueryBuilderTest {
 			new ChannelAddress("_sum", "EssActiveChargeEnergy"));
 	private static final Resolution RESOLUTION = new Resolution(5, ChronoUnit.MINUTES);
 
-	private static final QueryProxy FLUX = QueryProxy.flux();
-	private static final QueryProxy INFLUX_QL = QueryProxy.influxQl();
+	private static final QueryProxy FLUX = QueryProxy.flux("tag");
+	private static final QueryProxy INFLUX_QL = QueryProxy.influxQl("tag");
 
 	@Test
 	public void testFluxBuildHistoricDataQuery() throws OpenemsNamedException {
@@ -72,16 +72,6 @@ public class QueryBuilderTest {
 	public void testInfluxqlBuildHistoricEnergyPerPeriodQuerySingleValueInDay() throws OpenemsNamedException {
 		INFLUX_QL.buildHistoricEnergyPerPeriodQuerySingleValueInDay(BUCKET, MEASUREMENT, EDGE_ID, TO_DATE, FROM_DATE,
 				ENERGY_CHANNELS, RESOLUTION);
-	}
-
-	@Test
-	public void testFluxFetchAvailableSinceQuery() throws OpenemsNamedException {
-		FLUX.buildFetchAvailableSinceQuery(BUCKET);
-	}
-
-	@Test
-	public void testInlfuxqlFetchAvailableSinceQuery() throws OpenemsNamedException {
-		INFLUX_QL.buildFetchAvailableSinceQuery(BUCKET);
 	}
 
 	@Test

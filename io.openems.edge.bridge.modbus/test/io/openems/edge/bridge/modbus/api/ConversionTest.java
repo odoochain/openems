@@ -4,30 +4,11 @@ import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.ADD;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.DIVIDE;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.MULTIPLY;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SUBTRACT;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class ConversionTest {
-
-	@Test
-	public void testShortConversions() {
-
-		var v1 = 0;
-		var result = ModbusUtils.convert(v1, 0);
-		Short expected = 0;
-		assertEquals(expected, result);
-
-		v1 = 1;
-		result = ModbusUtils.convert(v1, 0);
-		expected = 1;
-		assertEquals(expected, result);
-
-		v1 = 65536;
-		result = ModbusUtils.convert(v1, 1);
-		expected = 1;
-		assertEquals(expected, result);
-	}
 
 	@Test
 	public void multiplyTest() {

@@ -12,8 +12,13 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private PersistencePriority persistencePriority;
 		private boolean debugMode;
 		private String clientId;
+		private String topicPrefix;
 		private String username;
 		private String password;
+		private String certPem;
+		private String privateKeyPem;
+		private String trustStorePem;
+		private String[] topicFilters;
 
 		private Builder() {
 		}
@@ -33,6 +38,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setTopicPrefix(String topicPrefix) {
+			this.topicPrefix = topicPrefix;
+			return this;
+		}
+
 		public Builder setUsername(String username) {
 			this.username = username;
 			return this;
@@ -43,6 +53,21 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setCertPem(String certPem) {
+			this.certPem = certPem;
+			return this;
+		}
+
+		public Builder setPrivateKeyPem(String privateKeyPem) {
+			this.privateKeyPem = privateKeyPem;
+			return this;
+		}
+
+		public Builder setTrustStorePath(String trustStorePem) {
+			this.trustStorePem = trustStorePem;
+			return this;
+		}
+
 		public Builder setPersistencePriority(PersistencePriority persistencePriority) {
 			this.persistencePriority = persistencePriority;
 			return this;
@@ -50,6 +75,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setDebugMode(boolean debugMode) {
 			this.debugMode = debugMode;
+			return this;
+		}
+
+		public Builder setTopicFilters(String... filter) {
+			this.topicFilters = filter;
 			return this;
 		}
 
@@ -95,6 +125,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	}
 
 	@Override
+	public String topicPrefix() {
+		return this.builder.topicPrefix;
+	}
+
+	@Override
 	public String username() {
 		return this.builder.username;
 	}
@@ -104,4 +139,23 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		return this.builder.password;
 	}
 
+	@Override
+	public String certPem() {
+		return this.builder.certPem;
+	}
+
+	@Override
+	public String privateKeyPem() {
+		return this.builder.privateKeyPem;
+	}
+
+	@Override
+	public String trustStorePem() {
+		return this.builder.trustStorePem;
+	}
+
+	@Override
+	public String[] topicFilters() {
+		return this.builder.topicFilters;
+	}
 }

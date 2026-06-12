@@ -1,23 +1,46 @@
 package io.openems.edge.goodwe.common;
 
+import static io.openems.common.utils.IntUtils.fitWithin;
+import static io.openems.common.utils.IntUtils.maxInt;
+import static io.openems.common.utils.IntUtils.minInteger;
+import static io.openems.common.utils.IntUtils.sumInt;
+import static io.openems.common.utils.IntUtils.sumInteger;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.INVERT;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SCALE_FACTOR_2;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SCALE_FACTOR_MINUS_1;
 import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SCALE_FACTOR_MINUS_2;
+import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SET_NULL_FOR_DEFAULT;
+import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.chain;
+import static io.openems.edge.bridge.modbus.api.ModbusUtils.readElementOnce;
+import static io.openems.edge.bridge.modbus.api.ModbusUtils.readElementsOnce;
+import static io.openems.edge.bridge.modbus.api.ModbusUtils.FunctionCode.FC3;
+import static io.openems.edge.common.channel.ChannelUtils.setValue;
+import static java.lang.Math.min;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
+import org.osgi.service.event.Event;
+import org.osgi.service.event.EventHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.openems.common.exceptions.NotImplementedException;
-import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
+import com.google.common.annotations.VisibleForTesting;
+
 import io.openems.common.exceptions.OpenemsException;
 import io.openems.common.types.OpenemsType;
-import io.openems.edge.batteryinverter.api.HybridManagedSymmetricBatteryInverter;
+import io.openems.common.utils.FunctionUtils;
+import io.openems.edge.battery.api.Battery;
 import io.openems.edge.bridge.modbus.api.AbstractOpenemsModbusComponent;
-import io.openems.edge.bridge.modbus.api.ChannelMetaInfoReadAndWrite;
 import io.openems.edge.bridge.modbus.api.ElementToChannelConverter;
 import io.openems.edge.bridge.modbus.api.ModbusProtocol;
 import io.openems.edge.bridge.modbus.api.ModbusUtils;
@@ -32,23 +55,43 @@ import io.openems.edge.bridge.modbus.api.element.UnsignedDoublewordElement;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
 import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
+import io.openems.edge.bridge.modbus.api.task.Task;
 import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.channel.ChannelId.ChannelIdImpl;
+import io.openems.edge.common.channel.Doc;
 import io.openems.edge.common.channel.EnumReadChannel;
 import io.openems.edge.common.channel.IntegerReadChannel;
+import io.openems.edge.common.channel.internal.OpenemsTypeDoc;
 import io.openems.edge.common.component.OpenemsComponent;
+import io.openems.edge.common.event.EdgeEventConstants;
 import io.openems.edge.common.sum.GridMode;
 import io.openems.edge.common.taskmanager.Priority;
 import io.openems.edge.common.type.TypeUtils;
 import io.openems.edge.ess.api.HybridEss;
 import io.openems.edge.ess.api.SymmetricEss;
-import io.openems.edge.goodwe.charger.AbstractGoodWeEtCharger;
+import io.openems.edge.goodwe.charger.GoodWeCharger;
+import io.openems.edge.goodwe.charger.twostring.GoodWeChargerTwoString;
+import io.openems.edge.goodwe.common.GoodWeStateDefinitions.GwState;
+import io.openems.edge.goodwe.common.GoodWeStateDefinitions.GwStateTask;
 import io.openems.edge.goodwe.common.enums.BatteryMode;
-import io.openems.edge.goodwe.common.enums.GoodweType;
+import io.openems.edge.goodwe.common.enums.EmsPowerMode;
+import io.openems.edge.goodwe.common.enums.GoodWeType;
+import io.openems.edge.goodwe.genset.GoodWeStsBoxGensetMeter;
 import io.openems.edge.timedata.api.TimedataProvider;
 import io.openems.edge.timedata.api.utils.CalculateEnergyFromPower;
 
+@SuppressWarnings("deprecation")
 public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
-		implements GoodWe, OpenemsComponent, TimedataProvider {
+		implements GoodWe, OpenemsComponent, TimedataProvider, EventHandler {
+
+	private static final Logger LOG = LoggerFactory.getLogger(AbstractGoodWe.class);
+	private static final Map<Integer, GoodWe.ChannelId> DIAG_STATUS_H_STATES = Map.of(//
+			0x00000001, GoodWe.ChannelId.DIAG_STATUS_BATTERY_PRECHARGE_RELAY_OFF, //
+			0x00000002, GoodWe.ChannelId.DIAG_STATUS_BYPASS_RELAY_STICK, //
+			0x10000000, GoodWe.ChannelId.DIAG_STATUS_METER_VOLTAGE_SAMPLE_FAULT, //
+			0x20000000, GoodWe.ChannelId.DIAG_STATUS_EXTERNAL_STOP_MODE_ENABLE, //
+			0x40000000, GoodWe.ChannelId.DIAG_STATUS_BATTERY_OFFGRID_DOD, //
+			0x80000000, GoodWe.ChannelId.DIAG_STATUS_BATTERY_SOC_ADJUST_ENABLE);
 
 	private final Logger log = LoggerFactory.getLogger(AbstractGoodWe.class);
 
@@ -60,7 +103,9 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 	private final CalculateEnergyFromPower calculateDcChargeEnergy;
 	private final CalculateEnergyFromPower calculateDcDischargeEnergy;
 
-	protected final Set<AbstractGoodWeEtCharger> chargers = new HashSet<>();
+	protected final Set<GoodWeCharger> chargers = new HashSet<>();
+
+	protected final ApplyPowerHandler applyPowerHandler = new ApplyPowerHandler(this);
 
 	protected AbstractGoodWe(//
 			io.openems.edge.common.channel.ChannelId activePowerChannelId, //
@@ -71,7 +116,7 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 			io.openems.edge.common.channel.ChannelId dcChargeEnergyChannelId, //
 			io.openems.edge.common.channel.ChannelId dcDischargeEnergyChannelId, //
 			io.openems.edge.common.channel.ChannelId[] firstInitialChannelIds, //
-			io.openems.edge.common.channel.ChannelId[]... furtherInitialChannelIds) throws OpenemsNamedException {
+			io.openems.edge.common.channel.ChannelId[]... furtherInitialChannelIds) {
 		super(firstInitialChannelIds, furtherInitialChannelIds);
 		this.activePowerChannelId = activePowerChannelId;
 		this.reactivePowerChannelId = reactivePowerChannelId;
@@ -83,74 +128,14 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 	}
 
 	@Override
-	protected final ModbusProtocol defineModbusProtocol() throws OpenemsException {
+	protected final ModbusProtocol defineModbusProtocol() {
 		var protocol = new ModbusProtocol(this, //
 
 				new FC3ReadRegistersTask(35001, Priority.LOW, //
 						m(SymmetricEss.ChannelId.MAX_APPARENT_POWER, new UnsignedWordElement(35001)), //
 						new DummyRegisterElement(35002), //
-						m(GoodWe.ChannelId.SERIAL_NUMBER, new StringWordElement(35003, 8)), //
-						m(GoodWe.ChannelId.GOODWE_TYPE, new StringWordElement(35011, 5), new ElementToChannelConverter(
-								// element -> channel
-								value -> {
-									// Evaluate GoodweType
-									final GoodweType result;
-									if (value == null) {
-										result = GoodweType.UNDEFINED;
-									} else {
-										String stringValue = TypeUtils.<String>getAsType(OpenemsType.STRING, value);
-										switch (stringValue) {
-										// TODO add identification for FENECON branded inverter
-										case "GW10K-BT":
-											result = GoodweType.GOODWE_10K_BT;
-											break;
-										case "GW8K-BT":
-											result = GoodweType.GOODWE_8K_BT;
-											break;
-										case "GW5K-BT":
-											result = GoodweType.GOODWE_5K_BT;
-											break;
-										case "GW10K-ET":
-											result = GoodweType.GOODWE_10K_ET;
-											break;
-										case "GW8K-ET":
-											result = GoodweType.GOODWE_8K_ET;
-											break;
-										case "GW5K-ET":
-											result = GoodweType.GOODWE_5K_ET;
-											break;
-										case "FHI-10-DAH":
-											result = GoodweType.FENECON_FHI_10_DAH;
-											break;
-										default:
-											this.logInfo(this.log, "Unable to identify GoodWe by name [" + value + "]");
-											result = GoodweType.UNDEFINED;
-											break;
-										}
-									}
-									// Log on first occurrence
-									if (result != this.getGoodweType()) {
-										switch (result) {
-										case GOODWE_10K_BT:
-										case GOODWE_8K_BT:
-										case GOODWE_5K_BT:
-										case GOODWE_10K_ET:
-										case GOODWE_8K_ET:
-										case GOODWE_5K_ET:
-										case FENECON_FHI_10_DAH:
-											this.logInfo(this.log, "Identified " + result.getName());
-											break;
-										case UNDEFINED:
-											break;
-										}
-									}
-									return result;
-								}, //
-
-								// channel -> element
-								value -> value))
-
-				), //
+						m(GoodWe.ChannelId.SERIAL_NUMBER, new StringWordElement(35003, 8)) //
+				),
 
 				new FC3ReadRegistersTask(35016, Priority.LOW, //
 						m(GoodWe.ChannelId.DSP_FM_VERSION_MASTER, new UnsignedWordElement(35016)), //
@@ -158,17 +143,22 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.DSP_BETA_VERSION, new UnsignedWordElement(35018)), //
 						m(GoodWe.ChannelId.ARM_FM_VERSION, new UnsignedWordElement(35019)), //
 						m(GoodWe.ChannelId.ARM_BETA_VERSION, new UnsignedWordElement(35020)) //
-				), //
+				),
 
 				new FC3ReadRegistersTask(35111, Priority.LOW, //
 						// Registers for PV1 and PV2 (35103 to 35110) are read via DC-Charger
 						// implementation
-						m(GoodWe.ChannelId.V_PV3, new UnsignedWordElement(35111), SCALE_FACTOR_MINUS_1), //
+						m(GoodWe.ChannelId.V_PV3, new UnsignedWordElement(35111),
+								chain(SET_NULL_FOR_DEFAULT(0xFFFF), SCALE_FACTOR_MINUS_1)), //
 						m(GoodWe.ChannelId.I_PV3, new UnsignedWordElement(35112), SCALE_FACTOR_MINUS_1), //
 						m(GoodWe.ChannelId.P_PV3, new UnsignedDoublewordElement(35113)), //
-						m(GoodWe.ChannelId.V_PV4, new UnsignedWordElement(35115), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.I_PV4, new UnsignedWordElement(35116), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.P_PV4, new UnsignedDoublewordElement(35117)), //
+						m(GoodWe.ChannelId.V_PV4, new UnsignedWordElement(35115),
+								chain(SET_NULL_FOR_DEFAULT(0xFFFF), SCALE_FACTOR_MINUS_1)), //
+						m(GoodWe.ChannelId.I_PV4, new UnsignedWordElement(35116),
+								chain(SET_NULL_FOR_DEFAULT(0xFFFF), SCALE_FACTOR_MINUS_1)), //
+						m(GoodWe.ChannelId.P_PV4, new UnsignedDoublewordElement(35117),
+								chain(SET_NULL_FOR_DEFAULT(0xFFFFFFFFL), SCALE_FACTOR_MINUS_1)), //
+
 						m(GoodWe.ChannelId.PV_MODE, new UnsignedDoublewordElement(35119)), //
 						// Registers for Grid Smart-Meter (35121 to 35135) are read via GridMeter
 						// implementation
@@ -176,17 +166,13 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(SymmetricEss.ChannelId.GRID_MODE, new UnsignedWordElement(35136), //
 								new ElementToChannelConverter(value -> {
 									Integer intValue = TypeUtils.<Integer>getAsType(OpenemsType.INTEGER, value);
-									if (intValue != null) {
-										switch (intValue) {
-										case 0:
-											return GridMode.UNDEFINED;
-										case 1:
-											return GridMode.ON_GRID;
-										case 2:
-											return GridMode.OFF_GRID;
-										}
-									}
-									return GridMode.UNDEFINED;
+									final var goodWeType = this.getGoodweType();
+									final var isGensetActive = this.getGensetOperatingMode().isDefined()
+											&& this.getGensetOperatingMode().get();
+
+									final var gridMode = mapGridMode(goodWeType, intValue, isGensetActive);
+									setValue(this, GoodWe.ChannelId.GRID_MODE_FAULT, gridMode == GridMode.UNDEFINED);
+									return gridMode;
 								}))), //
 
 				new FC3ReadRegistersTask(35137, Priority.LOW, //
@@ -230,24 +216,6 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.WORK_MODE, new UnsignedWordElement(35187)), //
 						new DummyRegisterElement(35188), //
 						m(new BitsWordElement(35189, this) //
-								.bit(0, GoodWe.ChannelId.STATE_0) //
-								.bit(1, GoodWe.ChannelId.STATE_1) //
-								.bit(2, GoodWe.ChannelId.STATE_2) //
-								.bit(3, GoodWe.ChannelId.STATE_3) //
-								.bit(4, GoodWe.ChannelId.STATE_4) //
-								.bit(5, GoodWe.ChannelId.STATE_5) //
-								.bit(6, GoodWe.ChannelId.STATE_6) //
-								.bit(7, GoodWe.ChannelId.STATE_7) //
-								.bit(8, GoodWe.ChannelId.STATE_8) //
-								.bit(9, GoodWe.ChannelId.STATE_9) //
-								.bit(10, GoodWe.ChannelId.STATE_10) //
-								.bit(11, GoodWe.ChannelId.STATE_11) //
-								.bit(12, GoodWe.ChannelId.STATE_12) //
-								.bit(13, GoodWe.ChannelId.STATE_13)//
-								.bit(14, GoodWe.ChannelId.STATE_14)//
-								.bit(15, GoodWe.ChannelId.STATE_15)//
-						), //
-						m(new BitsWordElement(35190, this) //
 								.bit(0, GoodWe.ChannelId.STATE_16) //
 								.bit(1, GoodWe.ChannelId.STATE_17) //
 								.bit(2, GoodWe.ChannelId.STATE_18) //
@@ -264,6 +232,24 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								.bit(13, GoodWe.ChannelId.STATE_29) //
 								.bit(14, GoodWe.ChannelId.STATE_30) //
 								.bit(15, GoodWe.ChannelId.STATE_31) //
+						), //
+						m(new BitsWordElement(35190, this) //
+								.bit(0, GoodWe.ChannelId.STATE_0) //
+								.bit(1, GoodWe.ChannelId.STATE_1) //
+								.bit(2, GoodWe.ChannelId.STATE_2) //
+								.bit(3, GoodWe.ChannelId.STATE_3) //
+								.bit(4, GoodWe.ChannelId.STATE_4) //
+								.bit(5, GoodWe.ChannelId.STATE_5) //
+								.bit(6, GoodWe.ChannelId.STATE_6) //
+								.bit(7, GoodWe.ChannelId.STATE_7) //
+								.bit(8, GoodWe.ChannelId.STATE_8) //
+								.bit(9, GoodWe.ChannelId.STATE_9) //
+								.bit(10, GoodWe.ChannelId.STATE_10) //
+								.bit(11, GoodWe.ChannelId.STATE_11) //
+								.bit(12, GoodWe.ChannelId.STATE_12) //
+								.bit(13, GoodWe.ChannelId.STATE_13)//
+								.bit(14, GoodWe.ChannelId.STATE_14)//
+								.bit(15, GoodWe.ChannelId.STATE_15)//
 						), //
 
 						// The total PV production energy from installation
@@ -284,15 +270,63 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.BATTERY_STRINGS, new UnsignedWordElement(35212)), //
 						m(GoodWe.ChannelId.CPLD_WARNING_CODE, new UnsignedWordElement(35213)), //
 						new DummyRegisterElement(35214, 35217), //
-						m(GoodWe.ChannelId.DIAG_STATUS_H, new UnsignedDoublewordElement(35218)), //
-						m(GoodWe.ChannelId.DIAG_STATUS_L, new UnsignedDoublewordElement(35220)), //
+						new UnsignedDoublewordElement(35218).onUpdateCallback(code -> detectDiagStatesH(code) //
+								.forEach((channel, value) -> this.channel(channel).setNextValue(value))),
+
+						m(new BitsWordElement(35220, this) //
+								.bit(0, GoodWe.ChannelId.DIAG_STATUS_BMS_OVER_TEMPERATURE)//
+								.bit(1, GoodWe.ChannelId.DIAG_STATUS_BMS_OVERCHARGE)//
+								.bit(2, GoodWe.ChannelId.DIAG_STATUS_BMS_CHARGE_DISABLE)//
+								.bit(3, GoodWe.ChannelId.DIAG_STATUS_SELF_USE_OFF)//
+								.bit(4, GoodWe.ChannelId.DIAG_STATUS_SOC_DELTA_OVER_RANGE)//
+								.bit(5, GoodWe.ChannelId.DIAG_STATUS_BATTERY_SELF_DISCHARGE)//
+								.bit(6, GoodWe.ChannelId.DIAG_STATUS_OFFGRID_SOC_LOW)//
+								.bit(7, GoodWe.ChannelId.DIAG_STATUS_GRID_WAVE_UNSTABLE)//
+								.bit(8, GoodWe.ChannelId.DIAG_STATUS_FEED_POWER_LIMIT)//
+								.bit(9, GoodWe.ChannelId.DIAG_STATUS_PF_VALUE_SET)//
+								.bit(10, GoodWe.ChannelId.DIAG_STATUS_REAL_POWER_LIMIT)//
+								.bit(12, GoodWe.ChannelId.DIAG_STATUS_SOC_PROTECT_OFF)), //
+
+						m(new BitsWordElement(35221, this) //
+								.bit(0, GoodWe.ChannelId.DIAG_STATUS_BATTERY_VOLT_LOW)//
+								.bit(1, GoodWe.ChannelId.DIAG_STATUS_BATTERY_SOC_LOW)//
+								.bit(2, GoodWe.ChannelId.DIAG_STATUS_BATTERY_SOC_IN_BACK)//
+								.bit(3, GoodWe.ChannelId.DIAG_STATUS_BMS_DISCHARGE_DISABLE)//
+								.bit(4, GoodWe.ChannelId.DIAG_STATUS_DISCHARGE_TIME_ON)//
+								.bit(5, GoodWe.ChannelId.DIAG_STATUS_CHARGE_TIME_ON)//
+								.bit(6, GoodWe.ChannelId.DIAG_STATUS_DISCHARGE_DRIVE_ON)//
+								.bit(7, GoodWe.ChannelId.DIAG_STATUS_BMS_DISCHG_CURRENT_LOW)//
+								.bit(8, GoodWe.ChannelId.DIAG_STATUS_DISCHARGE_CURRENT_LOW)//
+								.bit(9, GoodWe.ChannelId.DIAG_STATUS_METER_COMM_LOSS)//
+								.bit(10, GoodWe.ChannelId.DIAG_STATUS_METER_CONNECT_REVERSE)//
+								.bit(11, GoodWe.ChannelId.DIAG_STATUS_SELF_USE_LOAD_LIGHT)//
+								.bit(12, GoodWe.ChannelId.DIAG_STATUS_EMS_DISCHARGE_IZERO)//
+								.bit(13, GoodWe.ChannelId.DIAG_STATUS_DISCHARGE_BUS_HIGH)//
+								.bit(14, GoodWe.ChannelId.DIAG_STATUS_BATTERY_DISCONNECT)//
+								.bit(15, GoodWe.ChannelId.DIAG_STATUS_BATTERY_OVERCHARGE)), //
+
 						new DummyRegisterElement(35222, 35224), //
 						m(GoodWe.ChannelId.EH_BATTERY_FUNCTION_ACTIVE, new UnsignedWordElement(35225)), //
 						m(GoodWe.ChannelId.ARC_SELF_CHECK_STATUS, new UnsignedWordElement(35226)) //
 				),
 
 				new FC3ReadRegistersTask(35250, Priority.LOW, //
-						m(new BitsWordElement(35250, this) //
+
+						/*
+						 * Table 8-30 Grid Detailed WARNING (35250 - 35253, U64)
+						 */
+						new DummyRegisterElement(35250, 35251), //
+						m(new BitsWordElement(35252, this) //
+								.bit(0, GoodWe.ChannelId.STATE_86) //
+								.bit(1, GoodWe.ChannelId.STATE_87) //
+								.bit(2, GoodWe.ChannelId.STATE_88) //
+								.bit(3, GoodWe.ChannelId.STATE_89) //
+								.bit(4, GoodWe.ChannelId.STATE_90) //
+								.bit(5, GoodWe.ChannelId.STATE_91) //
+								.bit(6, GoodWe.ChannelId.STATE_92) //
+								.bit(7, GoodWe.ChannelId.STATE_93) //
+						), //
+						m(new BitsWordElement(35253, this) //
 								.bit(0, GoodWe.ChannelId.STATE_70) //
 								.bit(1, GoodWe.ChannelId.STATE_71) //
 								.bit(2, GoodWe.ChannelId.STATE_72) //
@@ -309,18 +343,21 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								.bit(13, GoodWe.ChannelId.STATE_83) //
 								.bit(14, GoodWe.ChannelId.STATE_84) //
 								.bit(15, GoodWe.ChannelId.STATE_85)), //
-						m(new BitsWordElement(35251, this) //
-								.bit(0, GoodWe.ChannelId.STATE_86) //
-								.bit(1, GoodWe.ChannelId.STATE_87) //
-								.bit(2, GoodWe.ChannelId.STATE_88) //
-								.bit(3, GoodWe.ChannelId.STATE_89) //
-								.bit(4, GoodWe.ChannelId.STATE_90) //
-								.bit(5, GoodWe.ChannelId.STATE_91) //
-								.bit(6, GoodWe.ChannelId.STATE_92) //
-								.bit(7, GoodWe.ChannelId.STATE_93) //
+
+						/*
+						 * Table 8-31 Inverter detailed error (35254 - 35257, U64)
+						 */
+						new DummyRegisterElement(35254, 35255), //
+						m(new BitsWordElement(35256, this) //
+								.bit(0, GoodWe.ChannelId.STATE_110) //
+								.bit(1, GoodWe.ChannelId.STATE_111) //
+								.bit(2, GoodWe.ChannelId.STATE_112) //
+								.bit(3, GoodWe.ChannelId.STATE_113) //
+								.bit(4, GoodWe.ChannelId.STATE_114) //
+								.bit(5, GoodWe.ChannelId.STATE_115) //
+								.bit(6, GoodWe.ChannelId.STATE_116) //
 						), //
-						new DummyRegisterElement(35252, 35253), //
-						m(new BitsWordElement(35254, this) //
+						m(new BitsWordElement(35257, this) //
 								.bit(0, GoodWe.ChannelId.STATE_94) //
 								.bit(1, GoodWe.ChannelId.STATE_95) //
 								.bit(2, GoodWe.ChannelId.STATE_96) //
@@ -337,17 +374,19 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								.bit(13, GoodWe.ChannelId.STATE_107) //
 								.bit(14, GoodWe.ChannelId.STATE_108) //
 								.bit(15, GoodWe.ChannelId.STATE_109)), //
-						m(new BitsWordElement(35255, this) //
-								.bit(0, GoodWe.ChannelId.STATE_110) //
-								.bit(1, GoodWe.ChannelId.STATE_111) //
-								.bit(2, GoodWe.ChannelId.STATE_112) //
-								.bit(3, GoodWe.ChannelId.STATE_113) //
-								.bit(4, GoodWe.ChannelId.STATE_114) //
-								.bit(5, GoodWe.ChannelId.STATE_115) //
-								.bit(6, GoodWe.ChannelId.STATE_116) //
+
+						/*
+						 * Table 8-32 Inverter detailed status (35258 - 35261, U64)
+						 */
+						new DummyRegisterElement(35258, 35259), //
+						m(new BitsWordElement(35260, this) //
+								.bit(0, GoodWe.ChannelId.STATE_133) //
+								.bit(1, GoodWe.ChannelId.STATE_134) //
+								.bit(2, GoodWe.ChannelId.STATE_135) //
+								.bit(3, GoodWe.ChannelId.STATE_136) //
+								.bit(4, GoodWe.ChannelId.STATE_137) //
 						), //
-						new DummyRegisterElement(35256, 35257), //
-						m(new BitsWordElement(35258, this) //
+						m(new BitsWordElement(35261, this) //
 								.bit(0, GoodWe.ChannelId.STATE_117) //
 								.bit(1, GoodWe.ChannelId.STATE_118) //
 								.bit(2, GoodWe.ChannelId.STATE_119) //
@@ -364,14 +403,7 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								.bit(13, GoodWe.ChannelId.STATE_130) //
 								.bit(14, GoodWe.ChannelId.STATE_131) //
 								.bit(15, GoodWe.ChannelId.STATE_132)), //
-						m(new BitsWordElement(35259, this) //
-								.bit(0, GoodWe.ChannelId.STATE_133) //
-								.bit(1, GoodWe.ChannelId.STATE_134) //
-								.bit(2, GoodWe.ChannelId.STATE_135) //
-								.bit(3, GoodWe.ChannelId.STATE_136) //
-								.bit(4, GoodWe.ChannelId.STATE_137) //
-						), //
-						new DummyRegisterElement(35260, 35267), //
+						new DummyRegisterElement(35262, 35267), //
 						m(GoodWe.ChannelId.MAX_GRID_FREQ_WITHIN_1_MINUTE, new UnsignedWordElement(35268),
 								SCALE_FACTOR_MINUS_2), //
 						m(GoodWe.ChannelId.MIN_GRID_FREQ_WITHIN_1_MINUTE, new UnsignedWordElement(35269),
@@ -402,6 +434,7 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 
 				// Registers 36066 to 36120 throw "Illegal Data Address"
 
+				// 37000 - DRM Status - DRED only for Australia
 				new FC3ReadRegistersTask(37000, Priority.LOW, //
 						m(new BitsWordElement(37000, this) //
 								.bit(0, GoodWe.ChannelId.DRM0)//
@@ -587,171 +620,6 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								SCALE_FACTOR_MINUS_1), // ), //
 						m(GoodWe.ChannelId.BMS_OFFLINE_SOC_UNDER_MIN, new UnsignedWordElement(45358))), //
 
-				// Safety
-				new FC3ReadRegistersTask(45400, Priority.LOW, //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S1, new UnsignedWordElement(45400), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S1_TIME, new UnsignedWordElement(45401)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S1, new UnsignedWordElement(45402), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S1_TIME, new UnsignedWordElement(45403)), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S2, new UnsignedWordElement(45404), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S2_TIME, new UnsignedWordElement(45405)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S2, new UnsignedWordElement(45406), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S2_TIME, new UnsignedWordElement(45407)), //
-						m(GoodWe.ChannelId.GRID_VOLT_QUALITY, new UnsignedWordElement(45408), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S1, new UnsignedWordElement(45409), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S1_TIME, new UnsignedWordElement(45410)), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S1, new UnsignedWordElement(45411), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S1_TIME, new UnsignedWordElement(45412)), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S2, new UnsignedWordElement(45413), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S2_TIME, new UnsignedWordElement(45414)), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S2, new UnsignedWordElement(45415), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S2_TIME, new UnsignedWordElement(45416)), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH, new UnsignedWordElement(45417), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW, new UnsignedWordElement(45418), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH, new UnsignedWordElement(45419), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW, new UnsignedWordElement(45420), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_RECOVER_TIME, new UnsignedWordElement(45421)), //
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_HIGH, new UnsignedWordElement(45422),
-								SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_LOW, new UnsignedWordElement(45423), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_HIGH, new UnsignedWordElement(45424),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_LOW, new UnsignedWordElement(45425), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_TIME, new UnsignedWordElement(45426)), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_TIME, new UnsignedWordElement(45427)), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_GENERATE, new UnsignedWordElement(45428)), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_RECONNECT, new UnsignedWordElement(45429)), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_REDUCTION, new UnsignedWordElement(45430)), //
-						m(GoodWe.ChannelId.GRID_PROTECT, new UnsignedWordElement(45431)) //
-				), //
-
-				new FC3ReadRegistersTask(45428, Priority.LOW, //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_GENERATE, new UnsignedWordElement(45428),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_RECONNECT, new UnsignedWordElement(45429),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_REDUCTION, new UnsignedWordElement(45430),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_PROTECT, new UnsignedWordElement(45431))), //
-
-				// Cos Phi Curve
-				new FC3ReadRegistersTask(45432, Priority.LOW, //
-						m(GoodWe.ChannelId.POWER_SLOPE_ENABLE, new UnsignedWordElement(45432)), //
-						m(GoodWe.ChannelId.ENABLE_CURVE_PU, new UnsignedWordElement(45433)), //
-						m(GoodWe.ChannelId.A_POINT_POWER, new SignedWordElement(45434)), //
-						m(GoodWe.ChannelId.A_POINT_COS_PHI, new SignedWordElement(45435), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.B_POINT_POWER, new SignedWordElement(45436)), //
-						m(GoodWe.ChannelId.B_POINT_COS_PHI, new SignedWordElement(45437), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_POINT_POWER, new SignedWordElement(45438)), //
-						m(GoodWe.ChannelId.C_POINT_COS_PHI, new SignedWordElement(45439)),
-						m(GoodWe.ChannelId.LOCK_IN_VOLTAGE, new UnsignedWordElement(45440), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LOCK_OUT_VOLTAGE, new UnsignedWordElement(45441), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LOCK_OUT_POWER, new SignedWordElement(45442)), //
-
-						// Power and frequency curve
-						m(new BitsWordElement(45443, this)//
-								.bit(0, GoodWe.ChannelId.POWER_FREQUENCY_ENABLED)//
-								.bit(1, GoodWe.ChannelId.POWER_FREQUENCY_RESPONSE_MODE)//
-						), //
-						m(GoodWe.ChannelId.FFROZEN_DCH, new UnsignedWordElement(45444), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FFROZEN_CH, new UnsignedWordElement(45445), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FSTOP_DCH, new UnsignedWordElement(45446), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FSTOP_CH, new UnsignedWordElement(45447), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.OF_RECOVERY_WAITING_TIME, new UnsignedWordElement(45448),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.RECOVERY_FREQURNCY1, new UnsignedWordElement(45449), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.RECOVERY_FREQUENCY2, new UnsignedWordElement(45450), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.OF_RECOVERY_SLOPE, new UnsignedWordElement(45451), //
-								new ChannelMetaInfoReadAndWrite(45451, 45452)), //
-						m(GoodWe.ChannelId.CFP_SETTINGS, new UnsignedWordElement(45452), //
-								new ChannelMetaInfoReadAndWrite(45452, 45451)), //
-						m(GoodWe.ChannelId.CFP_OF_SLOPE_PERCENT, new UnsignedWordElement(45453), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.CFP_UF_SLOPE_PERCENT, new UnsignedWordElement(45454), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.CFP_OF_RECOVER_POWER_PERCENT, new UnsignedWordElement(45455))), //
-
-				// QU Curve
-				new FC3ReadRegistersTask(45456, Priority.LOW, //
-						m(GoodWe.ChannelId.QU_CURVE, new UnsignedWordElement(45456)), //
-						m(GoodWe.ChannelId.LOCK_IN_POWER_QU, new SignedWordElement(45457)), //
-						m(GoodWe.ChannelId.LOCK_OUT_POWER_QU, new SignedWordElement(45458)), //
-						m(GoodWe.ChannelId.V1_VOLTAGE, new UnsignedWordElement(45459), SCALE_FACTOR_MINUS_1), // ), //
-						m(GoodWe.ChannelId.V1_VALUE, new SignedWordElement(45460)), //
-						m(GoodWe.ChannelId.V2_VOLTAGE, new UnsignedWordElement(45461), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V2_VALUE, new SignedWordElement(45462)), //
-						m(GoodWe.ChannelId.V3_VOLTAGE, new UnsignedWordElement(45463), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V3_VALUE, new SignedWordElement(45464)), //
-						m(GoodWe.ChannelId.V4_VOLTAGE, new UnsignedWordElement(45465), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V4_VALUE, new SignedWordElement(45466)), //
-						m(GoodWe.ChannelId.K_VALUE, new UnsignedWordElement(45467)), //
-						m(GoodWe.ChannelId.TIME_CONSTANT, new UnsignedWordElement(45468)), //
-						m(GoodWe.ChannelId.MISCELLANEA, new UnsignedWordElement(45469))), //
-
-				// PU Curve
-				new FC3ReadRegistersTask(45472, Priority.LOW, //
-						m(GoodWe.ChannelId.PU_CURVE, new UnsignedWordElement(45472)), //
-						m(GoodWe.ChannelId.POWER_CHANGE_RATE, new UnsignedWordElement(45473)), //
-						m(GoodWe.ChannelId.V1_VOLTAGE_PU, new UnsignedWordElement(45474), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V1_VALUE_PU, new SignedWordElement(45475), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V2_VOLTAGE_PU, new UnsignedWordElement(45476), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V2_VALUE_PU, new SignedWordElement(45477), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V3_VOLTAGE_PU, new UnsignedWordElement(45478), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V3_VALUE_PU, new SignedWordElement(45479), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V4_VOLTAGE_PU, new UnsignedWordElement(45480), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V4_VALUE_PU, new SignedWordElement(45481), SCALE_FACTOR_MINUS_1), //
-						// 80=Pf 0.8, 20= -0.8Pf
-						m(GoodWe.ChannelId.FIXED_POWER_FACTOR, new UnsignedWordElement(45482), SCALE_FACTOR_MINUS_2), //
-						// Set the percentage of rated power of the inverter
-						m(GoodWe.ChannelId.FIXED_REACTIVE_POWER, new SignedWordElement(45483), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.FIXED_ACTIVE_POWER, new UnsignedWordElement(45484), SCALE_FACTOR_MINUS_1)), //
-
-				new FC3ReadRegistersTask(45488, Priority.LOW, //
-						m(GoodWe.ChannelId.AUTO_TEST_ENABLE, new UnsignedWordElement(45488)), //
-						m(GoodWe.ChannelId.AUTO_TEST_STEP, new UnsignedWordElement(45489)), //
-						m(GoodWe.ChannelId.UW_ITALY_FREQ_MODE, new UnsignedWordElement(45490)), //
-						// this must be turned off to do Meter test . "1" means Off
-						m(GoodWe.ChannelId.ALL_POWER_CURVE_DISABLE, new UnsignedWordElement(45491)), //
-						m(GoodWe.ChannelId.R_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45492)), //
-						m(GoodWe.ChannelId.S_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45493)), //
-						m(GoodWe.ChannelId.T_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45494)), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S3, new UnsignedWordElement(45495), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S3_TIME, new UnsignedWordElement(45496)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S3, new UnsignedWordElement(45497), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S3_TIME, new UnsignedWordElement(45498)), //
-						m(GoodWe.ChannelId.ZVRT_CONFIG, new UnsignedWordElement(45499)), //
-						m(GoodWe.ChannelId.LVRT_START_VOLT, new UnsignedWordElement(45500), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LVRT_END_VOLT, new UnsignedWordElement(45501), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LVRT_START_TRIP_TIME, new UnsignedWordElement(45502)), //
-						m(GoodWe.ChannelId.LVRT_END_TRIP_TIME, new UnsignedWordElement(45503)), //
-						m(GoodWe.ChannelId.LVRT_TRIP_LIMIT_VOLT, new UnsignedWordElement(45504), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_START_VOLT, new UnsignedWordElement(45505), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_END_VOLT, new UnsignedWordElement(45506), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_START_TRIP_TIME, new UnsignedWordElement(45507)), //
-						m(GoodWe.ChannelId.HVRT_END_TRIP_TIME, new UnsignedWordElement(45508)), //
-						m(GoodWe.ChannelId.HVRT_TRIP_LIMIT_VOLT, new UnsignedWordElement(45509), SCALE_FACTOR_MINUS_1)//
-				), //
-
-				// Additional settings for PF/PU/UF
-				new FC3ReadRegistersTask(45510, Priority.LOW, //
-						m(GoodWe.ChannelId.PF_TIME_CONSTANT, new UnsignedWordElement(45510)), //
-						m(GoodWe.ChannelId.POWER_FREQ_TIME_CONSTANT, new UnsignedWordElement(45511)), //
-						// Additional settings for P(U) Curve
-						m(GoodWe.ChannelId.PU_TIME_CONSTANT, new UnsignedWordElement(45512)), //
-						m(GoodWe.ChannelId.D_POINT_POWER, new SignedWordElement(45513)), //
-						m(GoodWe.ChannelId.D_POINT_COS_PHI, new SignedWordElement(45514)), //
-						// Additional settings for UF Curve
-						m(GoodWe.ChannelId.UF_RECOVERY_WAITING_TIME, new UnsignedWordElement(45515),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.UF_RECOVER_SLOPE, new UnsignedWordElement(45516)), //
-						m(GoodWe.ChannelId.CFP_UF_RECOVER_POWER_PERCENT, new UnsignedWordElement(45517)), //
-						m(GoodWe.ChannelId.POWER_CHARGE_LIMIT, new UnsignedWordElement(45518), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_CHARGE_LIMIT_RECONNECT, new UnsignedWordElement(45519),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_UF_CHARGE_STOP, new UnsignedWordElement(45520), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_OF_DISCHARGE_STOP, new UnsignedWordElement(45521),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_TWOSSTEPF_FLG, new UnsignedWordElement(45522))//
-				), //
-
 				new FC3ReadRegistersTask(47500, Priority.LOW, //
 						m(GoodWe.ChannelId.STOP_SOC_PROTECT, new UnsignedWordElement(47500)), //
 						m(GoodWe.ChannelId.BMS_FLOAT_VOLT, new UnsignedWordElement(47501), SCALE_FACTOR_MINUS_1), //
@@ -764,8 +632,7 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.BMS_AVG_CHG_HOURS, new UnsignedWordElement(47508)), //
 						m(GoodWe.ChannelId.FEED_POWER_ENABLE, new UnsignedWordElement(47509)), //
 						m(GoodWe.ChannelId.FEED_POWER_PARA_SET, new UnsignedWordElement(47510)), //
-						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(47511)), //
-						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedWordElement(47512)), //
+						new DummyRegisterElement(47511, 47512), //
 						m(GoodWe.ChannelId.BMS_CURR_LMT_COFF, new UnsignedWordElement(47513)), //
 						m(GoodWe.ChannelId.BATTERY_PROTOCOL_ARM, new UnsignedWordElement(47514)), //
 
@@ -840,7 +707,8 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.ISO_LIMIT, new UnsignedWordElement(45245)), //
 						// as default is deactivated, set "1" to activate LVRT function, Set "2" to
 						// activate HVRT, The same as 45499
-						m(GoodWe.ChannelId.LVRT_HVRT, new UnsignedWordElement(45246))), //
+						m(GoodWe.ChannelId.LVRT_HVRT, new UnsignedWordElement(45246))).debug(), //
+
 				new FC16WriteRegistersTask(45250, //
 						// to write or read the start up PV voltage of the inverter.Please refer to the
 						// user manual
@@ -906,178 +774,19 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 								SCALE_FACTOR_MINUS_1), // ), //
 						m(GoodWe.ChannelId.BMS_OFFLINE_SOC_UNDER_MIN, new UnsignedWordElement(45358))), //
 
-				// Safety Parameters
-				new FC16WriteRegistersTask(45400, //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S1, new UnsignedWordElement(45400), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S1_TIME, new UnsignedWordElement(45401)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S1, new UnsignedWordElement(45402), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S1_TIME, new UnsignedWordElement(45403)), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S2, new UnsignedWordElement(45404), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S2_TIME, new UnsignedWordElement(45405)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S2, new UnsignedWordElement(45406), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S2_TIME, new UnsignedWordElement(45407)), //
-						m(GoodWe.ChannelId.GRID_VOLT_QUALITY, new UnsignedWordElement(45408), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S1, new UnsignedWordElement(45409), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S1_TIME, new UnsignedWordElement(45410)), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S1, new UnsignedWordElement(45411), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S1_TIME, new UnsignedWordElement(45412)), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S2, new UnsignedWordElement(45413), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH_S2_TIME, new UnsignedWordElement(45414)), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S2, new UnsignedWordElement(45415), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW_S2_TIME, new UnsignedWordElement(45416)), //
-						// Connect voltage
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH, new UnsignedWordElement(45417), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW, new UnsignedWordElement(45418), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_HIGH, new UnsignedWordElement(45419), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_LOW, new UnsignedWordElement(45420), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_RECOVER_TIME, new UnsignedWordElement(45421)), //
-						// Reconnect voltage
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_HIGH, new UnsignedWordElement(45422),
-								SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_LOW, new UnsignedWordElement(45423), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_HIGH, new UnsignedWordElement(45424),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_LOW, new UnsignedWordElement(45425), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_VOLT_RECOVER_TIME, new UnsignedWordElement(45426)), //
-						m(GoodWe.ChannelId.GRID_FREQ_RECOVER_TIME, new UnsignedWordElement(45427)), //
-						// Power rate limit
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_GENERATE, new UnsignedWordElement(45428),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_RECONNECT, new UnsignedWordElement(45429),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_RATE_LIMIT_REDUCTION, new UnsignedWordElement(45430),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.GRID_PROTECT, new UnsignedWordElement(45431)), //
-						m(GoodWe.ChannelId.POWER_SLOPE_ENABLE, new UnsignedWordElement(45432))), //
-
-				// Cos Phi Curve
-				new FC16WriteRegistersTask(45433, //
-						m(GoodWe.ChannelId.ENABLE_CURVE_PU, new UnsignedWordElement(45433)), //
-						m(GoodWe.ChannelId.A_POINT_POWER, new SignedWordElement(45434)), //
-						m(GoodWe.ChannelId.A_POINT_COS_PHI, new SignedWordElement(45435), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.B_POINT_POWER, new SignedWordElement(45436)), //
-						m(GoodWe.ChannelId.B_POINT_COS_PHI, new SignedWordElement(45437), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_POINT_POWER, new SignedWordElement(45438)), //
-						m(GoodWe.ChannelId.C_POINT_COS_PHI, new SignedWordElement(45439), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.LOCK_IN_VOLTAGE, new UnsignedWordElement(45440), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LOCK_OUT_VOLTAGE, new UnsignedWordElement(45441), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LOCK_OUT_POWER, new SignedWordElement(45442))), //
-
-				// Power and frequency curve
-				// m(new BitsWordElement(45443, this)//
-				// .bit(0, GoodWe.ChannelId.STATE_70)//
-				// .bit(1, GoodWe.ChannelId.STATE_71)), //
-
-				// Power and frequency curve
-				new FC16WriteRegistersTask(45444, //
-						m(GoodWe.ChannelId.FFROZEN_DCH, new UnsignedWordElement(45444), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FFROZEN_CH, new UnsignedWordElement(45445), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FSTOP_DCH, new UnsignedWordElement(45446), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.FSTOP_CH, new UnsignedWordElement(45447), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.RECOVERY_WAITING_TIME, new UnsignedWordElement(45448)), //
-						m(GoodWe.ChannelId.RECOVERY_FREQURNCY1, new UnsignedWordElement(45449), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.RECOVERY_FREQUENCY2, new UnsignedWordElement(45450), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.CFP_SETTINGS, new UnsignedWordElement(45451), //
-								new ChannelMetaInfoReadAndWrite(45452, 45451)), //
-						m(GoodWe.ChannelId.OF_RECOVERY_SLOPE, new UnsignedWordElement(45452), //
-								new ChannelMetaInfoReadAndWrite(45451, 45452)), //
-						m(GoodWe.ChannelId.CFP_OF_SLOPE_PERCENT, new UnsignedWordElement(45453), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.CFP_UF_SLOPE_PERCENT, new UnsignedWordElement(45454), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.CFP_OF_RECOVER_POWER_PERCENT, new UnsignedWordElement(45455)), //
-
-						// QU Curve
-						m(GoodWe.ChannelId.QU_CURVE, new UnsignedWordElement(45456)), //
-						m(GoodWe.ChannelId.LOCK_IN_POWER_QU, new SignedWordElement(45457)), //
-						m(GoodWe.ChannelId.LOCK_OUT_POWER_QU, new SignedWordElement(45458)), //
-						m(GoodWe.ChannelId.V1_VOLTAGE, new UnsignedWordElement(45459), SCALE_FACTOR_MINUS_1), // ), //
-						m(GoodWe.ChannelId.V1_VALUE, new UnsignedWordElement(45460)), //
-						m(GoodWe.ChannelId.V2_VOLTAGE, new UnsignedWordElement(45461), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V2_VALUE, new UnsignedWordElement(45462)), //
-						m(GoodWe.ChannelId.V3_VOLTAGE, new UnsignedWordElement(45463), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V3_VALUE, new UnsignedWordElement(45464)), //
-						m(GoodWe.ChannelId.V4_VOLTAGE, new UnsignedWordElement(45465), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V4_VALUE, new SignedWordElement(45466)), //
-						m(GoodWe.ChannelId.K_VALUE, new UnsignedWordElement(45467)), //
-						m(GoodWe.ChannelId.TIME_CONSTANT, new UnsignedWordElement(45468)), //
-						m(GoodWe.ChannelId.MISCELLANEA, new UnsignedWordElement(45469))), //
-
-				// PU Curve
-				new FC16WriteRegistersTask(45472, //
-						m(GoodWe.ChannelId.PU_CURVE, new UnsignedWordElement(45472)), //
-						m(GoodWe.ChannelId.POWER_CHANGE_RATE, new UnsignedWordElement(45473), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.V1_VOLTAGE_PU, new UnsignedWordElement(45474), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V1_VALUE_PU, new SignedWordElement(45475)), //
-						m(GoodWe.ChannelId.V2_VOLTAGE_PU, new UnsignedWordElement(45476), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V2_VALUE_PU, new SignedWordElement(45477)), //
-						m(GoodWe.ChannelId.V3_VOLTAGE_PU, new UnsignedWordElement(45478), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V3_VALUE_PU, new SignedWordElement(45479)), //
-						m(GoodWe.ChannelId.V4_VOLTAGE_PU, new UnsignedWordElement(45480), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.V4_VALUE_PU, new SignedWordElement(45481)), //
-						// 80=Pf 0.8, 20= -0.8Pf
-						m(GoodWe.ChannelId.FIXED_POWER_FACTOR, new UnsignedWordElement(45482)), // [0,20]||[80,100]
-						// Set the percentage of rated power of the inverter
-						m(GoodWe.ChannelId.FIXED_REACTIVE_POWER, new SignedWordElement(45483)), // [-600,600]
-						m(GoodWe.ChannelId.FIXED_ACTIVE_POWER, new UnsignedWordElement(45484)), // [0,1000]
-						new DummyRegisterElement(45485, 45490), //
-						// This must be turned off to do Meter test . "1" means Off
-						m(GoodWe.ChannelId.ALL_POWER_CURVE_DISABLE, new UnsignedWordElement(45491)), //
-						// if it is 1-phase inverter, then use only R phase. Unbalance output function
-						// must be turned on to set different values for R/S/T phases
-						m(GoodWe.ChannelId.R_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45492)), //
-						m(GoodWe.ChannelId.S_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45493)), //
-						m(GoodWe.ChannelId.T_PHASE_FIXED_ACTIVE_POWER, new UnsignedWordElement(45494)), //
-						// only for countries where it needs 3-stage grid voltage
-						// protection, Eg. Czech Republic
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S3, new UnsignedWordElement(45495), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_HIGH_S3_TIME, new UnsignedWordElement(45496)), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S3, new UnsignedWordElement(45497), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.GRID_VOLT_LOW_S3_TIME, new UnsignedWordElement(45498)), //
-
-						// For ZVRT, LVRT, HVRT
-						m(GoodWe.ChannelId.ZVRT_CONFIG, new UnsignedWordElement(45499)), //
-						m(GoodWe.ChannelId.LVRT_START_VOLT, new UnsignedWordElement(45500), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LVRT_END_VOLT, new UnsignedWordElement(45501), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.LVRT_START_TRIP_TIME, new UnsignedWordElement(45502)), //
-						m(GoodWe.ChannelId.LVRT_END_TRIP_TIME, new UnsignedWordElement(45503)), //
-						m(GoodWe.ChannelId.LVRT_TRIP_LIMIT_VOLT, new UnsignedWordElement(45504), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_START_VOLT, new UnsignedWordElement(45505), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_END_VOLT, new UnsignedWordElement(45506), SCALE_FACTOR_MINUS_1), //
-						m(GoodWe.ChannelId.HVRT_START_TRIP_TIME, new UnsignedWordElement(45507)), //
-						m(GoodWe.ChannelId.HVRT_END_TRIP_TIME, new UnsignedWordElement(45508)), //
-						m(GoodWe.ChannelId.HVRT_TRIP_LIMIT_VOLT, new UnsignedWordElement(45509), SCALE_FACTOR_MINUS_1)//
-				), //
-
-				// Additional settings for PF/PU/UF
-				new FC16WriteRegistersTask(45510, //
-						m(GoodWe.ChannelId.PF_TIME_CONSTANT, new UnsignedWordElement(45510)), //
-						m(GoodWe.ChannelId.POWER_FREQ_TIME_CONSTANT, new UnsignedWordElement(45511)), //
-						// Additional settings for P(U) Curve
-						m(GoodWe.ChannelId.PU_TIME_CONSTANT, new UnsignedWordElement(45512)), //
-						m(GoodWe.ChannelId.D_POINT_POWER, new SignedWordElement(45513)), //
-						m(GoodWe.ChannelId.D_POINT_COS_PHI, new SignedWordElement(45514)), //
-						// Additional settings for UF Curve
-						m(GoodWe.ChannelId.UF_RECOVERY_WAITING_TIME, new UnsignedWordElement(45515),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.UF_RECOVER_SLOPE, new UnsignedWordElement(45516)), //
-						m(GoodWe.ChannelId.CFP_UF_RECOVER_POWER_PERCENT, new UnsignedWordElement(45517)), //
-						m(GoodWe.ChannelId.POWER_CHARGE_LIMIT, new UnsignedWordElement(45518), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.POWER_CHARGE_LIMIT_RECONNECT, new UnsignedWordElement(45519),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_UF_CHARGE_STOP, new UnsignedWordElement(45520), SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_OF_DISCHARGE_STOP, new UnsignedWordElement(45521),
-								SCALE_FACTOR_MINUS_2), //
-						m(GoodWe.ChannelId.C_EXT_TWOSSTEPF_FLG, new UnsignedWordElement(45522))//
-				), //
+				new FC16WriteRegistersTask(47500, //
+						// Internal GoodWe Battery Protection
+						m(GoodWe.ChannelId.STOP_SOC_PROTECT, new UnsignedWordElement(47500))), //
 
 				new FC16WriteRegistersTask(47505, //
 						// If using EMS, must set to "2"
 						m(GoodWe.ChannelId.MANUFACTURE_CODE, new UnsignedWordElement(47505)), //
 						new DummyRegisterElement(47506, 47508), //
 						m(GoodWe.ChannelId.FEED_POWER_ENABLE, new UnsignedWordElement(47509)), //
-						m(GoodWe.ChannelId.FEED_POWER_PARA_SET, new SignedWordElement(47510)), //
-						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(47511)), //
-						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedWordElement(47512)), //
-						new DummyRegisterElement(47513), //
+						m(GoodWe.ChannelId.FEED_POWER_PARA_SET, new SignedWordElement(47510)) //
+				), //
+
+				new FC16WriteRegistersTask(47514, //
 						m(GoodWe.ChannelId.BATTERY_PROTOCOL_ARM, new UnsignedWordElement(47514)), //
 						m(GoodWe.ChannelId.WORK_WEEK_1_START_TIME, new UnsignedWordElement(47515)), //
 						m(GoodWe.ChannelId.WORK_WEEK_1_END_TIME, new UnsignedWordElement(47516)), //
@@ -1104,61 +813,39 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.WBMS_SOC, new UnsignedWordElement(47908)), //
 						m(GoodWe.ChannelId.WBMS_SOH, new UnsignedWordElement(47909)), //
 						m(GoodWe.ChannelId.WBMS_TEMPERATURE, new SignedWordElement(47910), SCALE_FACTOR_MINUS_1), //
-						/**
+						/*
 						 * Warning Codes (table 8-8).
-						 *
-						 * <ul>
-						 * <li>Bit 12-31 Reserved
-						 * <li>Bit 11: System High Temperature
-						 * <li>Bit 10: System Low Temperature 2
-						 * <li>Bit 09: System Low Temperature 1
-						 * <li>Bit 08: Cell Imbalance
-						 * <li>Bit 07: System Reboot
-						 * <li>Bit 06: Communication Failure
-						 * <li>Bit 05: Discharge Over-Current
-						 * <li>Bit 04: Charge Over-Current
-						 * <li>Bit 03: Cell Low Temperature
-						 * <li>Bit 02: Cell High Temperature
-						 * <li>Bit 01: Discharge Under-Voltage
-						 * <li>Bit 00: Charge Over-Voltage
-						 * </ul>
+						 * 
+						 * <ul> <li>Bit 12-31 Reserved <li>Bit 11: System High Temperature <li>Bit 10:
+						 * System Low Temperature 2 <li>Bit 09: System Low Temperature 1 <li>Bit 08:
+						 * Cell Imbalance <li>Bit 07: System Reboot <li>Bit 06: Communication Failure
+						 * <li>Bit 05: Discharge Over-Current <li>Bit 04: Charge Over-Current <li>Bit
+						 * 03: Cell Low Temperature <li>Bit 02: Cell High Temperature <li>Bit 01:
+						 * Discharge Under-Voltage <li>Bit 00: Charge Over-Voltage </ul>
 						 */
 						m(GoodWe.ChannelId.WBMS_WARNING_CODE, new UnsignedDoublewordElement(47911)), //
-						/**
+						/*
 						 * Alarm Codes (table 8-7).
-						 *
-						 * <ul>
-						 * <li>Bit 16-31 Reserved
-						 * <li>Bit 15: Charge Over-Voltage Fault
-						 * <li>Bit 14: Discharge Under-Voltage Fault
-						 * <li>Bit 13: Cell High Temperature
-						 * <li>Bit 12: Communication Fault
-						 * <li>Bit 11: Charge Circuit Fault
-						 * <li>Bit 10: Discharge Circuit Fault
-						 * <li>Bit 09: Battery Lock
-						 * <li>Bit 08: Battery Break
-						 * <li>Bit 07: DC Bus Fault
-						 * <li>Bit 06: Precharge Fault
-						 * <li>Bit 05: Discharge Over-Current
-						 * <li>Bit 04: Charge Over-Current
-						 * <li>Bit 03: Cell Low Temperature
-						 * <li>Bit 02: Cell High Temperature
-						 * <li>Bit 01: Discharge Under-Voltage
-						 * <li>Bit 00: Charge Over-Voltage
-						 * </ul>
+						 * 
+						 * <ul> <li>Bit 16-31 Reserved <li>Bit 15: Charge Over-Voltage Fault <li>Bit 14:
+						 * Discharge Under-Voltage Fault <li>Bit 13: Cell High Temperature <li>Bit 12:
+						 * Communication Fault <li>Bit 11: Charge Circuit Fault <li>Bit 10: Discharge
+						 * Circuit Fault <li>Bit 09: Battery Lock <li>Bit 08: Battery Break <li>Bit 07:
+						 * DC Bus Fault <li>Bit 06: Precharge Fault <li>Bit 05: Discharge Over-Current
+						 * <li>Bit 04: Charge Over-Current <li>Bit 03: Cell Low Temperature <li>Bit 02:
+						 * Cell High Temperature <li>Bit 01: Discharge Under-Voltage <li>Bit 00: Charge
+						 * Over-Voltage </ul>
 						 */
 						m(GoodWe.ChannelId.WBMS_ALARM_CODE, new UnsignedDoublewordElement(47913)), //
-						/**
+						/*
 						 * BMS Status
-						 *
-						 * <ul>
-						 * <li>Bit 2: Stop Discharge
-						 * <li>Bit 1: Stop Charge
-						 * <li>Bit 0: Force Charge
+						 * 
+						 * <ul> <li>Bit 2: Stop Discharge <li>Bit 1: Stop Charge <li>Bit 0: Force Charge
 						 * </ul>
 						 */
 						m(GoodWe.ChannelId.WBMS_STATUS, new UnsignedWordElement(47915)), //
-						m(GoodWe.ChannelId.WBMS_DISABLE_TIMEOUT_DETECTION, new UnsignedWordElement(47916))), //
+						m(GoodWe.ChannelId.WBMS_DISABLE_TIMEOUT_DETECTION, new UnsignedWordElement(47916)) //
+				),
 
 				new FC3ReadRegistersTask(47900, Priority.LOW, //
 						m(GoodWe.ChannelId.WBMS_VERSION, new UnsignedWordElement(47900)), //
@@ -1178,31 +865,486 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.WBMS_TEMPERATURE, new SignedWordElement(47910), SCALE_FACTOR_MINUS_1), //
 						m(GoodWe.ChannelId.WBMS_WARNING_CODE, new UnsignedDoublewordElement(47911)), //
 						m(GoodWe.ChannelId.WBMS_ALARM_CODE, new UnsignedDoublewordElement(47913)), //
+
 						// TODO reset to individual states
-
 						m(GoodWe.ChannelId.WBMS_STATUS, new UnsignedWordElement(47915)), //
-						m(GoodWe.ChannelId.WBMS_DISABLE_TIMEOUT_DETECTION, new UnsignedWordElement(47916))) //
-		);
+						m(GoodWe.ChannelId.WBMS_DISABLE_TIMEOUT_DETECTION, new UnsignedWordElement(47916)) //
+				), //
 
-		// Handles different DSP versions
-		ModbusUtils.readELementOnce(protocol, new UnsignedWordElement(35016), true) //
-				.thenAccept(dspVersion -> {
-					try {
-						if (dspVersion >= 5) {
-							this.handleDspVersion5(protocol);
-						}
-						if (dspVersion >= 6) {
-							this.handleDspVersion6(protocol);
-						}
-						if (dspVersion >= 7) {
-							this.handleDspVersion7(protocol);
-						}
-					} catch (OpenemsException e) {
-						this.logError(this.log, "Unable to add task for modbus protocol");
+				// Registers for detailed analysis
+				new FC3ReadRegistersTask(48000, Priority.LOW,
+						m(GoodWe.ChannelId.GW_A_48000_BATTTERY1_CHARGE_MAX, new UnsignedWordElement(48000)), //
+						m(GoodWe.ChannelId.GW_A_48001_PV_LIMIT_POWER, new UnsignedDoublewordElement(48001)), //
+						m(GoodWe.ChannelId.GW_A_48003_INVERTER_MODE_CONTROL, new UnsignedWordElement(48003)), //
+						m(GoodWe.ChannelId.GW_A_48004_AC_LIMIT_POWER, new UnsignedDoublewordElement(48004)), //
+						m(GoodWe.ChannelId.GW_A_48006_BATTERY_MODE, new UnsignedWordElement(48006)), //
+						m(GoodWe.ChannelId.GW_A_48007_BATTERY_CHARGE_POWER, new UnsignedDoublewordElement(48007)), //
+						m(GoodWe.ChannelId.GW_A_48009_BATTERY_DISCHARGE_POWER, new UnsignedDoublewordElement(48009)), //
+						m(GoodWe.ChannelId.GW_A_48011_BMS_DISCHARGE_CURRENT_LIMIT, new UnsignedWordElement(48011)), //
+						m(GoodWe.ChannelId.GW_A_48012_BMS_CHARGE_CURRENT_LIMIT, new UnsignedWordElement(48012)), //
+						m(GoodWe.ChannelId.GW_A_48013_BATTERY_LEVEL, new UnsignedWordElement(48013)), //
+						m(GoodWe.ChannelId.GW_A_48014_R_PHASE_AC_LIMIT, new UnsignedWordElement(48014)), //
+						m(GoodWe.ChannelId.GW_A_48015_S_PHASE_AC_LIMIT, new UnsignedWordElement(48015)), //
+						m(GoodWe.ChannelId.GW_A_48016_T_PHASE_AC_LIMIT, new UnsignedWordElement(48016)), //
+						m(GoodWe.ChannelId.GW_A_48017_METER_STATUS, new UnsignedWordElement(48017)), //
+						m(GoodWe.ChannelId.GW_A_48018_METER_TOTAL_APPARENT_POWER, new SignedDoublewordElement(48018)), //
+						m(GoodWe.ChannelId.GW_A_48020_METER_TOTAL_ACTIVE_POWER, new SignedDoublewordElement(48020)), //
+						m(GoodWe.ChannelId.GW_A_48022_R_PHASE_LIMIT_INPUT, new SignedWordElement(48022)), //
+						m(GoodWe.ChannelId.GW_A_48023_S_PHASE_LIMIT_INPUT, new SignedWordElement(48023)), //
+						m(GoodWe.ChannelId.GW_A_48024_T_PHASE_LIMIT_INPUT, new SignedWordElement(48024)), //
+						m(GoodWe.ChannelId.GW_A_48025_MAX_BMS_DISCHARGE_CURRENT, new UnsignedWordElement(48025)), //
+						m(GoodWe.ChannelId.GW_A_48026_FEED_POWER_ENABLE, new UnsignedWordElement(48026)), //
+						m(GoodWe.ChannelId.GW_A_48027_BATTERY1_PERCENT_CHARGE, new UnsignedWordElement(48027)), //
+						m(GoodWe.ChannelId.GW_A_48028_BATTERY1_PERCENT_DISCHARGE, new UnsignedWordElement(48028)), //
+						m(GoodWe.ChannelId.GW_A_48029_BATTERY2_PERCENT_CHARGE, new UnsignedWordElement(48029)), //
+						m(GoodWe.ChannelId.GW_A_48030_BATTERY2_PERCENT_DISCHARGE, new UnsignedWordElement(48030)), //
+						m(GoodWe.ChannelId.GW_A_48031_BATTERY2_MODE, new UnsignedWordElement(48031)), //
+						m(GoodWe.ChannelId.GW_A_48032_BATTERY2_CHARGE_POWER, new UnsignedDoublewordElement(48032)), //
+						m(GoodWe.ChannelId.GW_A_48034_BATTERY2_DISCHARGE_POWER, new UnsignedDoublewordElement(48034)), //
+						m(GoodWe.ChannelId.GW_A_48036_BMS2_DISCHARGE_CURRENT_LIMIT, new UnsignedWordElement(48036)), //
+						m(GoodWe.ChannelId.GW_A_48037_BMS2_CHARGE_CURRENT_LIMIT, new UnsignedWordElement(48037)), //
+						m(GoodWe.ChannelId.GW_A_48038_BATTERY2_LEVEL, new UnsignedWordElement(48038)), //
+						m(GoodWe.ChannelId.GW_A_48039_BATTERY_CHARGE_VOLTAGE_LIMIT, new UnsignedWordElement(48039)), //
+						m(GoodWe.ChannelId.GW_A_48040_MAX_BMS2_DISCHARGE_CURRENT, new UnsignedWordElement(48040)), //
+						m(GoodWe.ChannelId.GW_A_48041_GENERATOR_OPERATING_MODE, new UnsignedWordElement(48041)) //
+				));
+
+		UnsignedWordElement[] elementsToRead = GoodWeStateDefinitions.GOODWE_STATE_REGISTER_TASKS.stream()
+				.map(GwStateTask::register) //
+				.map(UnsignedWordElement::new) //
+				.toArray(UnsignedWordElement[]::new);
+
+		readElementsOnce(FC3, protocol, ModbusUtils::doNotRetry, elementsToRead) //
+				.thenAccept((rsr) -> {
+
+					if (rsr.values().stream().allMatch(Objects::isNull)) {
+						return;
 					}
+
+					var modbusElements = new ArrayList<ModbusElement>();
+					IntStream.range(0, elementsToRead.length).forEach(i -> {
+						var address = elementsToRead[i].startAddress;
+						var gwStates = GoodWeStateDefinitions.GOODWE_STATE_REGISTER_TASKS.get(i).gwStates();
+						Integer registerValue = TypeUtils.getAsType(OpenemsType.INTEGER, rsr.values().get(i));
+
+						if (registerValue == null || registerValue == 0xffff || gwStates.isEmpty()) {
+							modbusElements.add(new DummyRegisterElement(address));
+							return;
+						}
+						var element = this.generateElementsAndChannels(address, gwStates);
+						modbusElements.add(this.m(element));
+					});
+
+					protocol.addTasks(new FC3ReadRegistersTask(32000, Priority.LOW,
+							modbusElements.toArray(ModbusElement[]::new)));
+				});
+
+		/*
+		 * Handle different GoodWe Types.
+		 *
+		 * GoodweType Firmware is differing from Type ET-Plus to ETT.
+		 *
+		 * Register 35011: GoodWeType as String (Not supported for GoodWe 20 & 30 - ETT)
+		 * Register 35003: Serial number as String (Fallback for GoodWe 20 & 30 - ETT)
+		 */
+		readElementOnce(FC3, protocol, ModbusUtils::retryOnNull, new StringWordElement(35011, 5)) //
+				.thenAccept(value -> {
+
+					/*
+					 * Evaluate GoodweType from GoodWe type register
+					 */
+					final var resultFromString = getGoodWeTypeFromStringValue(
+							TypeUtils.getAsType(OpenemsType.STRING, value));
+
+					if (resultFromString != GoodWeType.UNDEFINED) {
+
+						/*
+						 * ET-Plus
+						 */
+						this.logInfo(this.log, "Identified " + resultFromString.getName());
+						this.updateGoodWeType(resultFromString, protocol);
+
+						// Handles different ET-Plus DSP versions
+						ModbusUtils
+								.readElementOnce(FC3, protocol, ModbusUtils::retryOnNull,
+										new UnsignedWordElement(35016)) //
+								.thenAccept(dspVersion -> {
+									try {
+										if (dspVersion >= 5) {
+											this.handleDspVersion5(protocol);
+										}
+										if (dspVersion >= 6) {
+											this.handleDspVersion6(protocol);
+										}
+										if (dspVersion >= 7) {
+											this.handleDspVersion7(protocol);
+										}
+									} catch (OpenemsException e) {
+										this.logError(this.log, "Unable to add task for modbus protocol");
+									}
+								});
+						return;
+					}
+
+					/*
+					 * Evaluate GoodweType from serial number
+					 */
+					readElementOnce(FC3, protocol, ModbusUtils::retryOnNull, new StringWordElement(35003, 8)) //
+							.thenAccept(serialNr -> {
+								try {
+									this.handleDspVersion5(protocol);
+									this.handleDspVersion6(protocol);
+									this.handleDspVersion7(protocol);
+								} catch (OpenemsException e) {
+									this.logError(this.log, "Unable to add charger tasks for modbus protocol");
+								}
+
+								final var hardwareType = getGoodWeTypeFromSerialNr(serialNr);
+								this.updateGoodWeType(hardwareType, protocol);
+							});
 				});
 
 		return protocol;
+	}
+
+	private void updateGoodWeType(GoodWeType goodWeType, ModbusProtocol protocol) {
+		try {
+			this._setGoodweType(goodWeType);
+
+			switch (goodWeType) {
+			case UNDEFINED, GOODWE_10K_BT, GOODWE_8K_BT, GOODWE_5K_BT, GOODWE_10K_ET, GOODWE_8K_ET, GOODWE_5K_ET,
+					FENECON_FHI_10_DAH, FENECON_GEN2_6K, FENECON_GEN2_10K, FENECON_GEN2_15K -> {
+				this.handleDefaultEmsPower(protocol);
+			}
+
+			case FENECON_50K -> {
+				this.handleDefaultEmsPower(protocol);
+				this.handleMultipleStringChargers(protocol);
+				this.handleExtendedFeedPower(protocol);
+				this.handleNewFixPfRegisters(protocol);
+				this.handleEnablePfCurve(protocol);
+				this.handleGensetOperatingMode(protocol);
+			}
+
+			case FENECON_100K -> {
+				this.handleMultipleStringChargers(protocol);
+				this.handleExtendedFeedPower(protocol);
+				this.handleNewFixPfRegisters(protocol);
+				this.handleNewEmsPower(protocol);
+				this.handleGensetOperatingMode(protocol);
+			}
+
+			case FENECON_FHI_20_DAH, FENECON_FHI_29_9_DAH -> {
+				this.handleMultipleStringChargers(protocol);
+				this.handleDefaultEmsPower(protocol);
+			}
+			}
+		} catch (OpenemsException e) {
+			this.logError(this.log, "Unable to add charger tasks for modbus protocol");
+		}
+	}
+
+	@Override
+	public void handleEvent(Event event) {
+		if (!this.isEnabled()) {
+			return;
+		}
+		switch (event.getTopic()) {
+		case EdgeEventConstants.TOPIC_CYCLE_BEFORE_PROCESS_IMAGE:
+
+			// Set charger information for MPPTs having more than one PV e.g.
+			// GoodWeChargerTwoString.
+			this.setMultipleStringChannels();
+		}
+	}
+
+	/**
+	 * Get GoodWe type from the GoodWe string representation.
+	 *
+	 * @param stringValue GoodWe type as String
+	 * @return type as {@link GoodWeType}
+	 */
+	protected static GoodWeType getGoodWeTypeFromStringValue(String stringValue) {
+		if (stringValue == null || stringValue.isEmpty()) {
+			return GoodWeType.UNDEFINED;
+		}
+
+		return switch (stringValue) {
+		case "GW10K-BT" -> GoodWeType.GOODWE_10K_BT;
+		case "GW8K-BT" -> GoodWeType.GOODWE_8K_BT;
+		case "GW5K-BT" -> GoodWeType.GOODWE_5K_BT;
+		case "GW10K-ET" -> GoodWeType.GOODWE_10K_ET;
+		case "GW8K-ET" -> GoodWeType.GOODWE_8K_ET;
+		case "GW5K-ET" -> GoodWeType.GOODWE_5K_ET;
+		case "FHI-10-DAH" -> GoodWeType.FENECON_FHI_10_DAH;
+		default -> GoodWeType.UNDEFINED;
+		};
+	}
+
+	/**
+	 * Get GoodWe type from serial number.
+	 *
+	 * @param serialNr Serial number
+	 * @return type as {@link GoodWeType}
+	 */
+	protected static GoodWeType getGoodWeTypeFromSerialNr(String serialNr) {
+		if (serialNr == null || serialNr.isEmpty()) {
+			return GoodWeType.UNDEFINED;
+		}
+
+		// Example serial numbers: default=9010KETT228W0004 float(29.9)=929K9ETT231W0159
+		return Stream.of(GoodWeType.values()) //
+				.filter(t -> {
+					try {
+						return t.serialNrFilter.apply(serialNr);
+					} catch (Exception e) {
+						LOG.warn("Unable to parse GoodWe Serial Number [" + serialNr + "] with [" + t.name() + "]: "
+								+ e.getMessage());
+						e.printStackTrace();
+						return false;
+					}
+				}) //
+				.findFirst() //
+				.orElse(GoodWeType.UNDEFINED);
+	}
+
+	private void handleExtendedFeedPower(ModbusProtocol protocol) {
+		protocol.addTask(//
+				new FC3ReadRegistersTask(42003, Priority.LOW, //
+						m(GoodWe.ChannelId.EXTENDED_FEED_POWER_ENABLE, new UnsignedWordElement(42003)), //
+						m(GoodWe.ChannelId.EXTENDED_FEED_POWER_PARA_SET, new SignedDoublewordElement(42004)) //
+				) //
+		);
+		protocol.addTask(//
+				new FC16WriteRegistersTask(42003,
+						m(GoodWe.ChannelId.EXTENDED_FEED_POWER_ENABLE, new UnsignedWordElement(42003)), //
+						m(GoodWe.ChannelId.EXTENDED_FEED_POWER_PARA_SET, new SignedDoublewordElement(42004)) //
+				) //
+		);
+
+	}
+
+	private void handleNewFixPfRegisters(ModbusProtocol protocol) {
+		protocol.addTask(//
+				new FC3ReadRegistersTask(45539, Priority.LOW, //
+						m(GoodWe.ChannelId.ENABLE_FIXED_POWER_FACTOR_V2, new UnsignedWordElement(45539)), //
+						m(GoodWe.ChannelId.FIXED_POWER_FACTOR_V2, new UnsignedWordElement(45540)) //
+				) //
+		);
+		protocol.addTask(//
+				new FC16WriteRegistersTask(45539,
+						m(GoodWe.ChannelId.ENABLE_FIXED_POWER_FACTOR_V2, new UnsignedWordElement(45539)), //
+						m(GoodWe.ChannelId.FIXED_POWER_FACTOR_V2, new UnsignedWordElement(45540)) //
+				) //
+		);
+	}
+
+	private void handleDefaultEmsPower(ModbusProtocol protocol) {
+		protocol.addTasks(//
+				new FC3ReadRegistersTask(47511, Priority.LOW, //
+						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(47511)), //
+						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedWordElement(47512)) //
+				), //
+				new FC16WriteRegistersTask(47511, //
+						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(47511)), //
+						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedWordElement(47512)) //
+				) //
+		);
+	}
+
+	private void handleNewEmsPower(ModbusProtocol protocol) {
+		protocol.addTasks(//
+				new FC3ReadRegistersTask(42000, Priority.LOW, //
+						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(42000)), //
+						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedDoublewordElement(42001)) //
+				), //
+				new FC16WriteRegistersTask(42000, //
+						m(GoodWe.ChannelId.EMS_POWER_MODE, new UnsignedWordElement(42000)), //
+						m(GoodWe.ChannelId.EMS_POWER_SET, new UnsignedDoublewordElement(42001)) //
+				) //
+		);
+	}
+
+	private void handleEnablePfCurve(ModbusProtocol protocol) {
+		protocol.addTasks(//
+				new FC3ReadRegistersTask(45751, Priority.LOW,
+						m(GoodWePowerSetting.ChannelId.V2_APM_ENABLE_PF_OVERFREQUENZY_CURVE,
+								new UnsignedWordElement(45751)),
+						new DummyRegisterElement(45752, 45775),
+						m(GoodWePowerSetting.ChannelId.V2_APM_ENABLE_PF_UNDERFREQUENZY_CURVE,
+								new UnsignedWordElement(45776))),
+				new FC16WriteRegistersTask(45751,
+						m(GoodWePowerSetting.ChannelId.V2_APM_ENABLE_PF_OVERFREQUENZY_CURVE,
+								new UnsignedWordElement(45751))),
+				new FC16WriteRegistersTask(45776, m(GoodWePowerSetting.ChannelId.V2_APM_ENABLE_PF_UNDERFREQUENZY_CURVE,
+						new UnsignedWordElement(45776))));
+	}
+
+	private void handleGensetOperatingMode(ModbusProtocol protocol) {
+		protocol.addTask(//
+				new FC3ReadRegistersTask(36197, Priority.HIGH,
+						m(GoodWeStsBoxGensetMeter.ChannelId.GENSET_OPERATING_MODE, new UnsignedWordElement(36197))));
+	}
+
+	/**
+	 * Handle multiple string chargers.
+	 *
+	 * <p>
+	 * For MPPT connectors e.g. two string on one MPPT the power information is
+	 * spread over several registers that should be read as complete blocks.
+	 *
+	 * @param protocol current protocol
+	 * @throws OpenemsException on error
+	 */
+	private void handleMultipleStringChargers(ModbusProtocol protocol) throws OpenemsException {
+		/*
+		 * For two string charger the registers the power information is spread over
+		 * several registers that should be read as complete blocks
+		 */
+		/*
+		 * Block 1: PV1 - PV4 voltage & current
+		 */
+		protocol.addTask(//
+				new FC3ReadRegistersTask(35103, Priority.HIGH, //
+						m(GoodWe.ChannelId.TWO_S_PV1_V, new UnsignedWordElement(35103),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV1_I, new UnsignedWordElement(35104),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+
+						// Power having wrong values for two-string charger
+						new DummyRegisterElement(35105, 35106),
+
+						m(GoodWe.ChannelId.TWO_S_PV2_V, new UnsignedWordElement(35107),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV2_I, new UnsignedWordElement(35108),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						new DummyRegisterElement(35109, 35110),
+						m(GoodWe.ChannelId.TWO_S_PV3_V, new UnsignedWordElement(35111),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV3_I, new UnsignedWordElement(35112),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						new DummyRegisterElement(35113, 35114),
+						m(GoodWe.ChannelId.TWO_S_PV4_V, new UnsignedWordElement(35115),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV4_I, new UnsignedWordElement(35116),
+								ElementToChannelConverter.SCALE_FACTOR_2)) //
+		);
+
+		/*
+		 * Block 2: PV5 - PV6 voltage & current (would continue till PV16) and MPPT
+		 * total power and current values
+		 */
+		protocol.addTask(//
+				new FC3ReadRegistersTask(35304, Priority.HIGH, //
+						m(GoodWe.ChannelId.TWO_S_PV5_V, new UnsignedWordElement(35304),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV5_I, new UnsignedWordElement(35305),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV6_V, new UnsignedWordElement(35306),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV6_I, new UnsignedWordElement(35307),
+								ElementToChannelConverter.SCALE_FACTOR_2), //
+						m(GoodWe.ChannelId.TWO_S_PV7_V, new UnsignedWordElement(35308),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV7_I, new UnsignedWordElement(35309),
+								ElementToChannelConverter.SCALE_FACTOR_2), //
+						m(GoodWe.ChannelId.TWO_S_PV8_V, new UnsignedWordElement(35310),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV8_I, new UnsignedWordElement(35311),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV9_V, new UnsignedWordElement(35312),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV9_I, new UnsignedWordElement(35313),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV10_V, new UnsignedWordElement(35314),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV10_I, new UnsignedWordElement(35315),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV11_V, new UnsignedWordElement(35316),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV11_I, new UnsignedWordElement(35317),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV12_V, new UnsignedWordElement(35318),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV12_I, new UnsignedWordElement(35319),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV13_V, new UnsignedWordElement(35320),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV13_I, new UnsignedWordElement(35321),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV14_V, new UnsignedWordElement(35322),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV14_I, new UnsignedWordElement(35323),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV15_V, new UnsignedWordElement(35324),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV15_I, new UnsignedWordElement(35325),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV16_V, new UnsignedWordElement(35326),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.TWO_S_PV16_I, new UnsignedWordElement(35327),
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						new DummyRegisterElement(35328, 35336),
+
+						m(GoodWe.ChannelId.MPPT1_P, new UnsignedWordElement(35337)), //
+						m(GoodWe.ChannelId.MPPT2_P, new UnsignedWordElement(35338)), //
+						m(GoodWe.ChannelId.MPPT3_P, new UnsignedWordElement(35339)), //
+						m(GoodWe.ChannelId.MPPT4_P, new UnsignedWordElement(35340)), //
+						m(GoodWe.ChannelId.MPPT5_P, new UnsignedWordElement(35341)), //
+						m(GoodWe.ChannelId.MPPT6_P, new UnsignedWordElement(35342)), //
+						m(GoodWe.ChannelId.MPPT7_P, new UnsignedWordElement(35343)), //
+						m(GoodWe.ChannelId.MPPT8_P, new UnsignedWordElement(35344)), //
+
+						m(GoodWe.ChannelId.MPPT1_I, new UnsignedWordElement(35345), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT2_I, new UnsignedWordElement(35346), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT3_I, new UnsignedWordElement(35347), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT4_I, new UnsignedWordElement(35348), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT5_I, new UnsignedWordElement(35349), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT6_I, new UnsignedWordElement(35350), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT7_I, new UnsignedWordElement(35351), //
+								ElementToChannelConverter.SCALE_FACTOR_2),
+						m(GoodWe.ChannelId.MPPT8_I, new UnsignedWordElement(35352), //
+								ElementToChannelConverter.SCALE_FACTOR_2)));
+	}
+
+	// TODO: Can be removed when GoodWeChargerTwoStringImpl has been deleted
+	private void setMultipleStringChannels() {
+
+		this.chargers.stream() //
+				.filter(GoodWeChargerTwoString.class::isInstance) //
+				.map(GoodWeChargerTwoString.class::cast) //
+				.forEach(charger -> {
+					var pvPort = charger.pvPort();
+
+					// Get actual Channels
+					IntegerReadChannel totalMpptPowerChannel = this.channel(pvPort.mpptPowerChannelId);
+					IntegerReadChannel totalMpptCurrentChannel = this.channel(pvPort.mpptCurrentChannelId);
+					IntegerReadChannel stringCurrentChannel = this.channel(pvPort.pvCurrentId);
+					IntegerReadChannel stringVoltageChannel = this.channel(pvPort.pvVoltageId);
+
+					// Power value from the total MPPT power and current values
+					charger._setActualPower(//
+							GoodWeChargerTwoString.calculateByRuleOfThree(//
+									totalMpptPowerChannel.getNextValue().asOptional(), //
+									totalMpptCurrentChannel.getNextValue().asOptional(), //
+									stringCurrentChannel.getNextValue().asOptional()) //
+									// If at least one value was present, the result should not be null.
+									.orElse(0) //
+					);
+
+					/*
+					 * TODO: Could also be achieved by using listeners for onSetNextValue in
+					 * addCharger and removeCharger.
+					 */
+					charger._setCurrent(stringCurrentChannel.getNextValue().get());
+					charger._setVoltage(stringVoltageChannel.getNextValue().get());
+				});
 	}
 
 	private void handleDspVersion7(ModbusProtocol protocol) throws OpenemsException {
@@ -1580,7 +1722,8 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						m(GoodWe.ChannelId.DRED_CMD, new UnsignedWordElement(47007)), //
 						new DummyRegisterElement(47008), //
 						m(GoodWe.ChannelId.WIFI_OR_LAN_SWITCH, new UnsignedWordElement(47009)), //
-						new DummyRegisterElement(47010, 47011), //
+						m(GoodWe.ChannelId.DRED_REMOTE_SHUTDOWN_RCR_FUNCTIONS_ENABLE, new UnsignedWordElement(47010)), //
+						new DummyRegisterElement(47011), //
 						m(GoodWe.ChannelId.LED_BLINK_TIME, new UnsignedWordElement(47012)), //
 						m(GoodWe.ChannelId.WIFI_LED_STATE, new UnsignedWordElement(47013)), //
 						m(GoodWe.ChannelId.COM_LED_STATE, new UnsignedWordElement(47014)), //
@@ -1621,9 +1764,11 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 						// Only for Australia, Refer to Table 8-22
 						m(GoodWe.ChannelId.DRED_CMD, new UnsignedWordElement(47007)), //
 						new DummyRegisterElement(47008), //
-						// For wifi+Lan module, to switch to LAN or WiFi communicaiton
+						// For wifi+Lan module, to switch to LAN or WiFi communication
 						m(GoodWe.ChannelId.WIFI_OR_LAN_SWITCH, new UnsignedWordElement(47009)), //
-						new DummyRegisterElement(47010, 47011), //
+						// Ripple Control Receiver on/off
+						m(GoodWe.ChannelId.DRED_REMOTE_SHUTDOWN_RCR_FUNCTIONS_ENABLE, new UnsignedWordElement(47010)), //
+						new DummyRegisterElement(47011), //
 						m(GoodWe.ChannelId.LED_BLINK_TIME, new UnsignedWordElement(47012)), //
 						// 1: off, 2: on, 3: flash 1x, 4: flash 2x, 5: flash 4x
 						m(GoodWe.ChannelId.WIFI_LED_STATE, new UnsignedWordElement(47013)), //
@@ -1688,7 +1833,7 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 		);
 	}
 
-	protected ModbusElement getSocModbusElement(int address) throws NotImplementedException {
+	protected ModbusElement getSocModbusElement(int address) {
 		if (this instanceof HybridEss) {
 			return m(SymmetricEss.ChannelId.SOC, new UnsignedWordElement(address), new ElementToChannelConverter(
 					// element -> channel
@@ -1704,21 +1849,19 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 					},
 					// channel -> element
 					value -> value));
-		}
-		if (this instanceof HybridManagedSymmetricBatteryInverter) {
-			return new DummyRegisterElement(address);
+
 		} else {
-			throw new NotImplementedException("Wrong implementation of AbstractGoodWe");
+			return new DummyRegisterElement(address);
 		}
 	}
 
 	@Override
-	public final void addCharger(AbstractGoodWeEtCharger charger) {
+	public final void addCharger(GoodWeCharger charger) {
 		this.chargers.add(charger);
 	}
 
 	@Override
-	public final void removeCharger(AbstractGoodWeEtCharger charger) {
+	public final void removeCharger(GoodWeCharger charger) {
 		this.chargers.remove(charger);
 	}
 
@@ -1730,17 +1873,31 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 	 */
 	protected final Integer calculatePvProduction() {
 		Integer productionPower = null;
-		for (AbstractGoodWeEtCharger charger : this.chargers) {
-			productionPower = TypeUtils.sum(productionPower, charger.getActualPower().get());
+		for (GoodWeCharger charger : this.chargers) {
+			productionPower = sumInteger(productionPower, charger.getActualPower().get());
 		}
 		return productionPower;
 	}
 
-	protected void updatePowerAndEnergyChannels() {
-		var productionPower = this.calculatePvProduction();
+	protected void updatePowerAndEnergyChannels(Integer soc, Integer batteryCurrent) {
+		final var productionPower = this.calculatePvProduction();
 		final Channel<Integer> pBattery1Channel = this.channel(GoodWe.ChannelId.P_BATTERY1);
 		var dcDischargePower = pBattery1Channel.value().get();
-		var acActivePower = TypeUtils.sum(productionPower, dcDischargePower);
+		final IntegerReadChannel dcDischargePowerChannel = this.channel(this.dcDischargePowerChannelId);
+
+		/*
+		 * Ignore impossible values of P_BATTERY
+		 */
+		dcDischargePower = postprocessPBattery1(dcDischargePower, this.getWbmsVoltage().get(),
+				this.getGoodweType().maxDcCurrent.apply(null),
+				state -> this.channel(GoodWe.ChannelId.IGNORE_IMPOSSIBLE_P_BATTERY_VALUE).setNextValue(state),
+				dcDischargePowerChannel.value().asOptional());
+
+		dcDischargePower = ignoreImpossibleMinPower(dcDischargePower, soc, batteryCurrent,
+				((EnumReadChannel) this.channel(GoodWe.ChannelId.EMS_POWER_MODE)).getNextValue().asEnum(),
+				this.getEmsPowerSetChannel().getNextValue().get());
+
+		var acActivePower = sumInteger(productionPower, dcDischargePower);
 
 		/*
 		 * Update AC Active Power
@@ -1768,7 +1925,6 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 		/*
 		 * Update DC Discharge Power
 		 */
-		IntegerReadChannel dcDischargePowerChannel = this.channel(this.dcDischargePowerChannelId);
 		dcDischargePowerChannel.setNextValue(dcDischargePower);
 
 		/*
@@ -1790,35 +1946,201 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 	}
 
 	/**
+	 * Postprocess PBattery1 value.
+	 * 
+	 * <p>
+	 * Impossible battery power values will be ignored.
+	 * 
+	 * <p>
+	 * The total max DC current including a buffer of 10A is used to identify an
+	 * impossible power value, as WBMS_VOLTAGE has lower priority than pBattery and
+	 * the battery could charge even if the BmsChargeMaxCurrent is 0.
+	 * 
+	 * @param pBattery     battery power
+	 * @param dcVoltage    dc voltage
+	 * @param maxDcCurrent max dc current
+	 * @param setState     consume state
+	 * @param prevPBattery previous battery power
+	 * @return possible battery power
+	 */
+	protected static Integer postprocessPBattery1(Integer pBattery, Integer dcVoltage, Integer maxDcCurrent,
+			Consumer<Boolean> setState, Optional<Integer> prevPBattery) {
+
+		/*
+		 * Values above maximum charge/discharge power
+		 */
+		var stateIgnoreImpossiblePBatteryValue = false;
+		if (pBattery != null && dcVoltage != null && maxDcCurrent != null) {
+
+			var impossibleDcChargePower = (maxDcCurrent + 10) * dcVoltage;
+			var impossibleDcDischargePower = (maxDcCurrent + 10) * dcVoltage;
+
+			if (pBattery < impossibleDcChargePower * -1 || pBattery > impossibleDcDischargePower) {
+				stateIgnoreImpossiblePBatteryValue = true;
+				pBattery = prevPBattery
+						.orElse(fitWithin(maxDcCurrent * dcVoltage * -1, maxDcCurrent * dcVoltage, pBattery));
+			}
+		}
+
+		setState.accept(stateIgnoreImpossiblePBatteryValue);
+		return pBattery;
+	}
+
+	/**
+	 * Ignore impossible minimum power.
+	 * 
+	 * <p>
+	 * Even if there is no real power charged to the battery, the GoodWe Channel
+	 * could remain on minimum power values. These values are ignored.
+	 * 
+	 * @param goodweDcPower GoodWe DC battery power in W
+	 * @param soc           State of Charge
+	 * @param cBattery      Battery current in A
+	 * @param powerMode     EMS power mode
+	 * @param powerSet      EMS power set
+	 * @return possible battery power
+	 */
+	protected static Integer ignoreImpossibleMinPower(Integer goodweDcPower, Integer soc, Integer cBattery,
+			EmsPowerMode powerMode, Long powerSet) {
+		if (cBattery == null || soc == null || goodweDcPower == null || cBattery != 0 || powerMode == null
+				|| powerSet == null) {
+			return goodweDcPower;
+		}
+
+		final var batFullOrEmpty = soc >= 100 || soc <= 0;
+		final var emsTargetOfZero = (powerMode == EmsPowerMode.CHARGE_BAT || powerMode == EmsPowerMode.DISCHARGE_BAT)
+				&& powerSet == 0;
+
+		if (batFullOrEmpty || emsTargetOfZero) {
+			return Math.abs(goodweDcPower) < 100 /* W */ ? 0 : goodweDcPower;
+		}
+
+		return goodweDcPower;
+	}
+
+	public record MaxAcPower(int maxAcImport, int maxAcExport) {
+	}
+
+	/**
 	 * Calculate and store Max-AC-Export and -Import channels.
 	 *
+	 * <p>
+	 * Calculate and store Max-AC-Export and -Import for use in
+	 * getStaticConstraints()
+	 * </p>
+	 *
 	 * @param maxApparentPower the max apparent power
+	 * @param battery          the battery used to get charge/discharge current and
+	 *                         voltage
 	 */
-	protected void calculateMaxAcPower(int maxApparentPower) {
-		// Calculate and store Max-AC-Export and -Import for use in
-		// getStaticConstraints()
-		var maxDcChargePower = /* can be negative for force-discharge */
-				TypeUtils.multiply(//
-						/* Inverter Charge-Max-Current */ this.getWbmsChargeMaxCurrent().get(), //
-						/* Voltage */ this.getWbmsVoltage().orElse(0));
-		int pvProduction = TypeUtils.max(0, this.calculatePvProduction());
+	protected void handleMaxAcPower(int maxApparentPower, Battery battery) {
+		this.handleMaxAcPower(maxApparentPower, battery.getChargeMaxCurrent().get(),
+				battery.getDischargeMaxCurrent().get(), battery.getVoltage().get());
+	}
 
-		// Calculates Max-AC-Import and Max-AC-Export as positive numbers
-		var maxAcImport = TypeUtils.subtract(maxDcChargePower,
-				TypeUtils.min(maxDcChargePower /* avoid negative number for `subtract` */, pvProduction));
-		var maxAcExport = TypeUtils.sum(//
-				/* Max DC-Discharge-Power */ TypeUtils.multiply(//
-						/* Inverter Discharge-Max-Current */ this.getWbmsDischargeMaxCurrent().get(), //
-						/* Voltage */ this.getWbmsVoltage().orElse(0)),
-				/* PV Production */ pvProduction);
+	/**
+	 * Calculate and store Max-AC-Export and -Import channels.
+	 *
+	 * <p>
+	 * Calculate and store Max-AC-Export and -Import for use in
+	 * getStaticConstraints()
+	 * </p>
+	 * 
+	 * @param maxApparentPower       the max apparent power
+	 * @param batChargeMaxCurrent    the charge max current of the battery
+	 * @param batDischargeMaxCurrent the discharge max current of the battery
+	 * @param batVoltage             the voltage of the battery
+	 */
+	protected void handleMaxAcPower(int maxApparentPower, Integer batChargeMaxCurrent, Integer batDischargeMaxCurrent,
+			Integer batVoltage) {
 
-		// Limit Max-AC-Power to inverter specific limit
-		maxAcImport = TypeUtils.min(maxAcImport, maxApparentPower);
-		maxAcExport = TypeUtils.min(maxAcExport, maxApparentPower);
+		final var result = calculateMaxAcPower(//
+				maxApparentPower, //
+				batChargeMaxCurrent, //
+				batDischargeMaxCurrent, //
+				batVoltage, //
+				this.getGoodweType().maxBatChargeP, //
+				this.getGoodweType().maxBatDischargeP, //
+				this.calculatePvProduction());
 
 		// Set Channels
-		this._setMaxAcImport(TypeUtils.multiply(maxAcImport, /* negate */ -1));
-		this._setMaxAcExport(maxAcExport);
+		this._setMaxAcImport(result.maxAcImport);
+		this._setMaxAcExport(result.maxAcExport);
+	}
+
+	/**
+	 * Calculate Max-AC-Export and -Import power.
+	 *
+	 * @param maxApparentPower       the max apparent power
+	 * @param batChargeMaxCurrent    the charge max current of the battery
+	 * @param batDischargeMaxCurrent the discharge max current of the battery
+	 * @param batVoltage             the voltage of the battery
+	 * @param maxInvDcChargeP        the maximum inverter DC charge power
+	 * @param maxInvDcDischargeP     the maximum inverter DC discharge power
+	 * @param pvProductionInteger    the DC production power; or null
+	 * @return MaxAcPower with maxAcImport and maxAcExport
+	 */
+	protected static MaxAcPower calculateMaxAcPower(int maxApparentPower, Integer batChargeMaxCurrent,
+			Integer batDischargeMaxCurrent, Integer batVoltage, Integer maxInvDcChargeP, Integer maxInvDcDischargeP,
+			Integer pvProductionInteger) {
+		final var pvProduction = maxInt(0, pvProductionInteger);
+
+		/*
+		 * Calculate Max-Ac-Import
+		 */
+		final var maxDcChargePower = calculateDcLimitation(batChargeMaxCurrent, batVoltage, maxInvDcChargeP);
+
+		var maxAcImport = maxDcChargePower //
+				- min(//
+						maxInt(0, maxDcChargePower) /* avoid negative number for `subtract` */, //
+						pvProduction);
+
+		/*
+		 * Calculate Max-Ac-Export
+		 */
+		final var maxDcDischargePower = calculateDcLimitation(batDischargeMaxCurrent, batVoltage, maxInvDcDischargeP);
+		var maxAcExport = sumInt(pvProduction, maxDcDischargePower);
+
+		// Limit Max-AC-Power to inverter specific limit
+		maxAcImport = min(maxApparentPower, maxAcImport);
+		maxAcExport = min(maxApparentPower, maxAcExport);
+
+		return new MaxAcPower(//
+				-maxAcImport /* negate */, // Max-Ac-Import is negative
+				maxAcExport);
+	}
+
+	/**
+	 * Calculate DC Limitation.
+	 *
+	 * <p>
+	 * Calculate the maximum DC power limit based on BMS max current, voltage & a
+	 * fixed inverter limit.
+	 * </p>
+	 *
+	 * @param bmsMaxCurrent BMS maximum current in A. Can be negative for
+	 *                      force-discharge
+	 * @param voltage       voltage in V
+	 * @param inverterLimit hard limit for DC power in W
+	 * @return the maximum DC power in W
+	 */
+	protected static int calculateDcLimitation(Integer bmsMaxCurrent, Integer voltage, Integer inverterLimit) {
+		final var bmsLimit = bmsMaxCurrent == null || voltage == null //
+				? 0 //
+				: bmsMaxCurrent * voltage;
+
+		return minInteger(bmsLimit, inverterLimit);
+	}
+
+	/**
+	 * Detect the current diagnostic high states.
+	 * 
+	 * @param value register value
+	 * @return DiagnosticStates with the information if it is active or not
+	 */
+	protected static Map<GoodWe.ChannelId, Boolean> detectDiagStatesH(Long value) {
+		return DIAG_STATUS_H_STATES.entrySet().stream().collect(
+				Collectors.toMap(Map.Entry::getValue, e -> !(Objects.isNull(value) || (value & e.getKey()) == 0)));
 	}
 
 	/**
@@ -1827,5 +2149,85 @@ public abstract class AbstractGoodWe extends AbstractOpenemsModbusComponent
 	 * @return {@link Integer}
 	 */
 	public abstract Integer getSurplusPower();
+
+	/**
+	 * Generates a Channel-ID for channels that are specific to a State.
+	 *
+	 * <p>
+	 * Generated ChannelName e.g. "GW_STATE_32007_B_10"
+	 * </p>
+	 *
+	 * @param register            register of the state
+	 * @param bit                 bit of the state
+	 * @param openemsType         specified type e.g. "INTEGER"
+	 * @param additionalDocConfig the additional doc configuration
+	 * @param channelConsumer     the additional configuration on the created
+	 *                            channel
+	 * @return the Channel-ID
+	 */
+	private ChannelIdImpl generateStateChannel(int register, int bit, OpenemsType openemsType,
+			Consumer<OpenemsTypeDoc<?>> additionalDocConfig, Consumer<Channel<?>> channelConsumer) {
+		final var doc = Doc.of(openemsType);
+		if (additionalDocConfig != null) {
+			additionalDocConfig.accept(doc);
+		}
+		var channelId = new ChannelIdImpl("GW_STATE_" + register + "_B_" + bit, doc);
+		final var channel = this.addChannel(channelId);
+
+		channelConsumer.accept(channel);
+
+		return channelId;
+	}
+
+	private BitsWordElement generateElementsAndChannels(int address, List<GwState> gwStates) {
+		var bitsElement = new BitsWordElement(address, this);
+		for (var state : gwStates) {
+			var channelId = this.generateStateChannel(address, state.bit(), OpenemsType.BOOLEAN,
+					t -> t.text(state.description()), FunctionUtils::doNothing);
+			bitsElement.bit(state.bit(), channelId);
+		}
+		return bitsElement;
+	}
+
+	@VisibleForTesting
+	static GridMode mapGridMode(GoodWeType goodWeType, Integer value, boolean isGensetActive) {
+		if (value == null) {
+			return GridMode.UNDEFINED;
+		}
+		return switch (goodWeType) {
+		case UNDEFINED, GOODWE_10K_BT, GOODWE_8K_BT, GOODWE_5K_BT, GOODWE_10K_ET, GOODWE_8K_ET, GOODWE_5K_ET,
+				FENECON_FHI_10_DAH, FENECON_FHI_20_DAH, FENECON_FHI_29_9_DAH, FENECON_GEN2_6K, FENECON_GEN2_10K,
+				FENECON_GEN2_15K -> {
+			yield defaultMapGridMode(value);
+		}
+		case FENECON_50K, FENECON_100K -> {
+			if (isGensetActive) {
+				yield GridMode.OFF_GRID_GENSET;
+			}
+			yield switch (value) {
+			case 0 -> GridMode.OFF_GRID;
+			case 1 -> GridMode.ON_GRID;
+			default -> GridMode.UNDEFINED;
+			};
+		}
+		case null -> defaultMapGridMode(value);
+		};
+	}
+
+	private static GridMode defaultMapGridMode(int value) {
+		return switch (value) {
+		case 1 -> GridMode.ON_GRID;
+		case 2 -> GridMode.OFF_GRID;
+		default -> GridMode.UNDEFINED;
+		};
+	}
+
+	protected static void removeTasks(//
+			ModbusProtocol protocol, //
+			List<Task> removingTasks //
+	) {
+		removingTasks.stream() //
+				.forEach(protocol::removeTask);
+	}
 
 }

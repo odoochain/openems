@@ -1,8 +1,13 @@
 package io.openems.backend.alerting;
 
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -14,17 +19,22 @@ import org.osgi.service.event.EventHandler;
 import org.osgi.service.event.propertytypes.EventTopics;
 import org.osgi.service.metatype.annotations.Designate;
 import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonPrimitive;
 
 import io.openems.backend.alerting.handler.OfflineEdgeHandler;
+import io.openems.backend.alerting.handler.SumStateHandler;
 import io.openems.backend.alerting.scheduler.Scheduler;
 import io.openems.backend.common.component.AbstractOpenemsBackendComponent;
+import io.openems.backend.common.debugcycle.DebugLoggable;
+import io.openems.backend.common.mail.Mailer;
 import io.openems.backend.common.metadata.Edge;
-import io.openems.backend.common.metadata.Mailer;
 import io.openems.backend.common.metadata.Metadata;
 import io.openems.common.event.EventReader;
+import io.openems.common.utils.JsonUtils;
+import io.openems.common.utils.ThreadPoolUtils;
 
 @Designate(ocd = Config.class, factory = false)
 @Component(//
@@ -34,16 +44,27 @@ import io.openems.common.event.EventReader;
 )
 @EventTopics({ //
 		Edge.Events.ON_SET_ONLINE, //
+		Edge.Events.ON_SET_SUM_STATE, //
 		Metadata.Events.AFTER_IS_INITIALIZED //
 })
-public class Alerting extends AbstractOpenemsBackendComponent implements EventHandler {
+public class Alerting extends AbstractOpenemsBackendComponent implements EventHandler, DebugLoggable {
 
-	private static final byte THREAD_POOL_SIZE = 2;
+	public static final String COMPONENT_ID = "alerting0";
+	public static final String METRIC_MESSAGES_SENT = "AlertingMessagesSent";
+	public static final String METRIC_MESSAGES_QUEUE = "AlertingMessagesQueue";
+
+	// Maximum number of messages constructed at the same time
+	private static final byte THREAD_POOL_SIZE = 4;
+	// Queue size from which warnings are issued
 	private static final byte THREAD_QUEUE_WARNING_THRESHOLD = 50;
 
-	protected final Scheduler scheduler;
+	private static ThreadPoolExecutor createDefaultExecutorService() {
+		final var threadFactory = new ThreadFactoryBuilder()
+				.setNameFormat(Alerting.class.getSimpleName() + ".EventHandler-%d").build();
+		return (ThreadPoolExecutor) Executors.newFixedThreadPool(THREAD_POOL_SIZE, threadFactory);
+	}
 
-	private final Logger log = LoggerFactory.getLogger(Alerting.class);
+	private final Logger log = AbstractOpenemsBackendComponent.getComponentLogger(this);
 	private final ThreadPoolExecutor executor;
 
 	@Reference
@@ -52,52 +73,92 @@ public class Alerting extends AbstractOpenemsBackendComponent implements EventHa
 	@Reference
 	protected Mailer mailer;
 
-	protected Handler<?>[] handlers = {};
+	private final Scheduler scheduler;
 
-	protected Alerting(Scheduler scheduler) {
+	protected final List<Handler<?>> handler = new ArrayList<>(2);
+
+	protected Alerting(Scheduler scheduler, ThreadPoolExecutor executor) {
 		super("Alerting");
-
+		this.executor = executor;
 		this.scheduler = scheduler;
-		this.executor = new ThreadPoolExecutor(0, THREAD_POOL_SIZE, 1, TimeUnit.HOURS, new LinkedBlockingQueue<>(), //
-				new ThreadFactoryBuilder().setNameFormat(Alerting.class.getSimpleName() + ".EventHandler-%d").build());
 	}
 
 	public Alerting() {
-		this(new Scheduler());
+		this(new Scheduler(), Alerting.createDefaultExecutorService());
 	}
 
 	@Activate
 	protected void activate(Config config) {
-		this.logInfo(this.log, "Activate");
+		this.log.info("Activate");
 		this.scheduler.start();
 
-		this.handlers = new Handler[] {
-				new OfflineEdgeHandler(this.scheduler, this.mailer, this.metadata, config.initialDelay()) };
+		if (config.notifyOnOffline()) {
+			this.handler.add(new OfflineEdgeHandler(this.scheduler, this.scheduler, this.mailer, this.metadata, //
+					config.initialDelay()));
+		}
+
+		if (config.notifyOnSumStateChange()) {
+			this.handler.add(new SumStateHandler(this.scheduler, this.scheduler, this.mailer, this.metadata));
+		}
 	}
 
 	@Deactivate
 	protected void deactivate() {
-		this.logInfo(this.log, "Deactivate");
-
-		for (var handler : this.handlers) {
-			handler.stop();
-		}
-		this.handlers = new Handler<?>[0];
+		this.log.info("Deactivate");
+		this.handler.forEach(Handler::stop);
+		this.handler.clear();
 		this.scheduler.stop();
 	}
 
 	@Override
 	public void handleEvent(Event event) {
-		var reader = new EventReader(event);
-		for (var handler : this.handlers) {
-			var task = handler.getEventHandler(reader);
+		final var reader = new EventReader(event);
+		for (var h : this.handler) {
+			final var task = h.getEventHandler(reader.getTopic());
 			if (task != null) {
-				this.executor.execute(task);
+				this.execute(task, reader);
 			}
 		}
-		int queueSize = this.executor.getQueue().size();
-		if (queueSize > 0 && queueSize % THREAD_QUEUE_WARNING_THRESHOLD == 0) {
-			this.logWarn(this.log, queueSize + " tasks in the EventHandlerQueue!");
-		}
 	}
+
+	private void execute(Consumer<EventReader> consumer, EventReader reader) {
+		this.executor.execute(() -> consumer.accept(reader));
+	}
+
+	@Override
+	public String debugLog() {
+		final var sb = new StringBuilder("[Alerting] ");
+
+		final int queueSize = this.executor.getQueue().size();
+		if (queueSize >= THREAD_QUEUE_WARNING_THRESHOLD) {
+			sb.append("%d tasks in the EventHandlerQueue! ".formatted(queueSize));
+		}
+		final String handlerStr = this.handler.stream().map(Handler::debugLog).collect(Collectors.joining(", "));
+		sb.append(handlerStr);
+
+		if (sb.isEmpty()) {
+			return null;
+		}
+		return sb.toString();
+	}
+
+	@Override
+	public Map<String, JsonElement> debugMetrics() {
+		final var map = new HashMap<String, JsonElement>();
+
+		final var poolMetrics = ThreadPoolUtils.debugMetrics(this.executor);
+		for (var entry : poolMetrics.entrySet()) {
+			map.put("%s/%s".formatted(COMPONENT_ID, entry.getKey()), new JsonPrimitive(entry.getValue()));
+		}
+
+		for (var h : this.handler) {
+			final var id = h.id();
+			final var metrics = h.getMetrics();
+			map.put("%s/%s".formatted(id, METRIC_MESSAGES_SENT), JsonUtils.toJson(metrics.messagesSent()));
+			map.put("%s/%s".formatted(id, METRIC_MESSAGES_QUEUE), JsonUtils.toJson(metrics.messagesQueue()));
+		}
+
+		return map;
+	}
+
 }
